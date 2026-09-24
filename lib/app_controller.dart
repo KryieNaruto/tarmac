@@ -14,8 +14,8 @@ class AppController extends ChangeNotifier {
     required this.subscriptionService,
     required this.v2rayService,
     required this.smartConnect,
-    http.Client? httpClient,
-  }) : _httpClient = httpClient;
+    this._httpClient,
+  });
 
   final StorageService storage;
   final SubscriptionService subscriptionService;

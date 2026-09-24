@@ -6,10 +6,10 @@ import 'package:tarmac/services/v2ray_gateway.dart';
 /// scripted failure); links not present in the map also resolve to null.
 class FakeV2rayGateway implements V2rayGateway {
   FakeV2rayGateway({
-    Map<String, int?> delayScript = const {},
+    this._delayScript = const {},
     this.permissionGranted = true,
     this.startShouldThrow = false,
-  }) : _delayScript = delayScript;
+  });
 
   final Map<String, int?> _delayScript;
   final bool permissionGranted;
