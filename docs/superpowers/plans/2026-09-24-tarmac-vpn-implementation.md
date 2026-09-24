@@ -961,7 +961,11 @@ abstract class V2rayGateway {
 /// plan), not by host-machine unit tests.
 class FlutterV2rayGateway implements V2rayGateway {
   FlutterV2rayGateway() {
-    _v2ray = FlutterV2ray(onStatusChanged: (status) {
+    // NOTE: the real exported class from package:flutter_v2ray_client is
+    // named `V2ray` (verified against the installed package source at
+    // ~/.pub-cache/hosted/pub.flutter-io.cn/flutter_v2ray_client-3.5.0/lib/flutter_v2ray.dart),
+    // not `FlutterV2ray`. Do not rename it back.
+    _v2ray = V2ray(onStatusChanged: (status) {
       _controller.add(
         status.state == 'CONNECTED'
             ? V2rayConnectionState.connected
@@ -970,7 +974,7 @@ class FlutterV2rayGateway implements V2rayGateway {
     });
   }
 
-  late final FlutterV2ray _v2ray;
+  late final V2ray _v2ray;
   final _controller = StreamController<V2rayConnectionState>.broadcast();
 
   @override
@@ -985,7 +989,7 @@ class FlutterV2rayGateway implements V2rayGateway {
   @override
   Future<int?> getServerDelay(String rawLink) async {
     try {
-      final parser = FlutterV2ray.parseFromURL(rawLink);
+      final parser = V2ray.parseFromURL(rawLink);
       return await _v2ray.getServerDelay(config: parser.getFullConfiguration());
     } catch (_) {
       return null;
@@ -995,7 +999,7 @@ class FlutterV2rayGateway implements V2rayGateway {
   @override
   Future<void> start({required String remark, required String rawLink}) async {
     _controller.add(V2rayConnectionState.connecting);
-    final parser = FlutterV2ray.parseFromURL(rawLink);
+    final parser = V2ray.parseFromURL(rawLink);
     await _v2ray.startV2Ray(
       remark: remark,
       config: parser.getFullConfiguration(),
@@ -1901,7 +1905,9 @@ ProxyNode _node({int? delayMs}) => ProxyNode(
 
 void main() {
   testWidgets('shows remark, protocol badge, and green delay text under 150ms', (tester) async {
-    await tester.pumpWidget(MaterialApp(home: NodeTile(node: _node(delayMs: 80))));
+    // ListTile (used inside NodeTile) requires a Material ancestor —
+    // MaterialApp alone does not provide one, so wrap in a Scaffold.
+    await tester.pumpWidget(MaterialApp(home: Scaffold(body: NodeTile(node: _node(delayMs: 80)))));
 
     expect(find.text('🇯🇵 Japan'), findsOneWidget);
     expect(find.text('VLESS'), findsOneWidget);
@@ -1909,12 +1915,12 @@ void main() {
   });
 
   testWidgets('shows 超时 for a timed-out node (delayMs == -1)', (tester) async {
-    await tester.pumpWidget(MaterialApp(home: NodeTile(node: _node(delayMs: -1))));
+    await tester.pumpWidget(MaterialApp(home: Scaffold(body: NodeTile(node: _node(delayMs: -1)))));
     expect(find.text('超时'), findsOneWidget);
   });
 
   testWidgets('shows 未测速 for an untested node (delayMs == null)', (tester) async {
-    await tester.pumpWidget(MaterialApp(home: NodeTile(node: _node())));
+    await tester.pumpWidget(MaterialApp(home: Scaffold(body: NodeTile(node: _node()))));
     expect(find.text('未测速'), findsOneWidget);
   });
 }
