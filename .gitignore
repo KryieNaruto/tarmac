@@ -44,3 +44,9 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 .xdgconfig/
+
+# Project-local standalone Flutter SDK (workaround for the shared /opt/flutter
+# install being blocked by another user's leftover build artifacts) and the
+# env-var helper script that points at it.
+/.flutter-sdk/
+.flutter-env.sh
