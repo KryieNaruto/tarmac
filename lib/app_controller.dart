@@ -255,7 +255,7 @@ class AppController extends ChangeNotifier {
   /// 具名参数只为测试注入极小的预算，生产调用不传、用默认值。
   Future<void> smartConnectNow({
     int batchSize = 24,
-    int concurrency = 8,
+    int concurrency = kTestConcurrency,
     Duration huntBudget = const Duration(seconds: 240),
     Duration verifyWindow = const Duration(seconds: 8),
   }) async {
@@ -295,8 +295,9 @@ class AppController extends ChangeNotifier {
           batch,
           concurrency: concurrency,
           onProgress: (current, done, total) {
-            // current 是「这一批」的完整列表（已测前缀 + 未测余量），不是全局
-            // 列表：只用它推进进度显示，绝不在这里并回 nodes（会打乱全局顺序）。
+            // current 是「这一批」的完整列表（与输入同序，已测/未测按原索引回填，
+            // 不是连续前缀），不是全局列表：只用它推进进度显示，绝不在这里并回
+            // nodes（会打乱全局顺序）。
             huntDone = start + done;
             statusMessage = '正在寻找可用节点 · 已测 $huntDone/$huntTotal';
             notifyListeners();

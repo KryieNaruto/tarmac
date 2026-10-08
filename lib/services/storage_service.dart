@@ -12,11 +12,6 @@ const _kLastRetestAtKey = 'tarmac.last_retest_at';  // ISO8601 字符串
 
 List<ProxySubscription> defaultSubscriptions() => [
       ProxySubscription(
-        id: 'https://raw.githubusercontent.com/freefq/free/master/v2',
-        name: 'freefq',
-        url: 'https://raw.githubusercontent.com/freefq/free/master/v2',
-      ),
-      ProxySubscription(
         id: 'https://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub',
         name: 'Pawdroid',
         url: 'https://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub',
@@ -27,21 +22,58 @@ List<ProxySubscription> defaultSubscriptions() => [
         url: 'https://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/v2ray.txt',
       ),
       ProxySubscription(
-        id: 'https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/airport_merge_base64.txt',
-        name: 'V2RayAggregator',
-        url: 'https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/airport_merge_base64.txt',
+        id: 'https://raw.githubusercontent.com/mohammadaz2/v2rayConfigsForYou/main/configs.txt',
+        name: 'mohammadaz2',
+        url: 'https://raw.githubusercontent.com/mohammadaz2/v2rayConfigsForYou/main/configs.txt',
       ),
     ];
 
+/// 已退役的内置默认源 id（订阅文件早已停止更新）。
+/// 迁移时**只**删这些 id，绝不碰用户自己添加的订阅。
+const _kRetiredDefaultSubIds = <String>{
+  'https://raw.githubusercontent.com/freefq/free/master/v2',
+  'https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/airport_merge_base64.txt',
+};
+
+/// 把退役的死默认源从存量订阅里摘掉，并补上当前默认源里还没有的那些。
+/// 只按 id 精确匹配；用户自建的同名订阅（id 是别的 URL）不受影响。
+///
+/// 仅在「存量列表里确实还留着退役源」时触发 —— 也就是从旧版本升上来的安装。
+/// 摘干净之后就永不再动手，因此用户此后删掉任何内置源都是粘性的，
+/// 不会被下次启动重新加回来（除非他自己把退役的 URL 又贴回去）。
+/// 返回 null 表示无需迁移，调用方应原样返回且不落盘。
+List<ProxySubscription>? migrateDefaultSubscriptions(
+  List<ProxySubscription> current,
+) {
+  final hasRetired = current.any((s) => _kRetiredDefaultSubIds.contains(s.id));
+  if (!hasRetired) return null;
+
+  final kept = current
+      .where((s) => !_kRetiredDefaultSubIds.contains(s.id))
+      .toList();
+  final ids = kept.map((s) => s.id).toSet();
+  for (final d in defaultSubscriptions()) {
+    if (ids.add(d.id)) kept.add(d);
+  }
+  return kept;
+}
+
 class StorageService {
+  /// 读订阅列表。存量安装里可能还留着早已停更的旧默认源，
+  /// 这里只在「从旧版本升上来、列表里还留着退役源」时迁移一次；迁移过或新装的用户不再受影响，
+  /// 从而保证用户自己删掉内置源的操作是粘性的。
   Future<List<ProxySubscription>> loadSubscriptions() async {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString(_kSubscriptionsKey);
     if (raw == null) return defaultSubscriptions();
     final list = jsonDecode(raw) as List<dynamic>;
-    return list
+    final stored = list
         .map((e) => ProxySubscription.fromJson(e as Map<String, dynamic>))
         .toList();
+    final migrated = migrateDefaultSubscriptions(stored);
+    if (migrated == null) return stored;
+    await saveSubscriptions(migrated);
+    return migrated;
   }
 
   Future<void> saveSubscriptions(List<ProxySubscription> subs) async {

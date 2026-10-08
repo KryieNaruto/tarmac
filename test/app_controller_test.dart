@@ -73,7 +73,7 @@ void main() {
   test('loadInitial populates subscriptions from storage defaults', () async {
     final controller = _buildController();
     await controller.loadInitial();
-    expect(controller.subscriptions, hasLength(4));
+    expect(controller.subscriptions, hasLength(3));
   });
 
   test('refreshSubscriptions fetches all enabled subs and dedupes nodes across them', () async {
@@ -84,7 +84,7 @@ void main() {
 
     await controller.refreshSubscriptions();
 
-    // 4 default subs x 2 links each = 8 raw, but 'shared' link repeats
+    // 3 default subs x 2 links each = 6 raw, but 'shared' link repeats
     // across every source and must collapse to a single node.
     final ids = controller.nodes.map((n) => n.id).toSet();
     expect(ids, contains('vless://shared@x:443#Shared'));
@@ -331,8 +331,11 @@ void main() {
     final gateway = FakeV2rayGateway(gate: gate);
     final controller = _buildController(gateway: gateway);
     await controller.loadInitial();
+    // 节点数必须 > 并发上限：worker 池在闸门前恰好领走 `min(并发, 节点数)` 个，
+    // 若节点数 <= 并发，就全部被领走，「未测到的节点延迟仍为 null」这条断言会落空。
+    final count = kTestConcurrency + 5;
     controller.debugSetNodesForTest([
-      for (var i = 0; i < 20; i++) _rawNode('vless://n$i'),
+      for (var i = 0; i < count; i++) _rawNode('vless://n$i'),
     ]);
 
     // 不 await：让 retestAll 跑到闸门前挂起，再中途取消并放行。
@@ -343,7 +346,7 @@ void main() {
     await future;
 
     // 未测节点被保留、没丢。
-    expect(controller.nodes, hasLength(20));
+    expect(controller.nodes, hasLength(count));
     expect(controller.statusMessage, contains('测速已停止'));
     // 未测的节点延迟仍是 null，没有被编造。
     expect(controller.nodes.any((n) => n.delayMs == null), isTrue);
@@ -388,11 +391,15 @@ void main() {
     final gateway = FakeV2rayGateway(gate: gate);
     final controller = _buildController(gateway: gateway);
     await controller.loadInitial();
+    // 节点数必须 > 并发上限：worker 池在闸门前恰好领走 `min(并发, 节点数)` 个，
+    // 若节点数 <= 并发，就全部被领走，「未测到的节点不进缓存」这条断言会落空
+    // （扫档时 --dart-define 把并发调到 > 20 也会踩到这一点）。
+    final count = kTestConcurrency + 5;
     controller.debugSetNodesForTest([
-      for (var i = 0; i < 20; i++) _rawNode('vless://n$i'),
+      for (var i = 0; i < count; i++) _rawNode('vless://n$i'),
     ]);
 
-    // 不 await：跑到闸门前挂起，取消后放行。
+    // 不 await：所有 worker 都在闸门前挂起，取消后放行。
     final future = controller.retestAll();
     await Future<void>.delayed(Duration.zero);
     controller.cancelRetest();
@@ -400,13 +407,14 @@ void main() {
     await future;
 
     final cached = await StorageService().loadNodeDelays();
-    // 只测了第一批（默认并发 8）——这些「测过但失败」的节点存成 -1（期望行为）；
-    // 因取消而仍为 null 的节点不得进缓存。
-    expect(cached, hasLength(8));
-    for (var i = 0; i < 8; i++) {
+    // 挂起时恰好有 kTestConcurrency 个 worker 各领走一个节点，取消放行后它们全部
+    // 测完（这些「测过但失败」的节点存成 -1，期望行为）；剩下的节点仍为 null，
+    // 不得进缓存。
+    expect(cached, hasLength(kTestConcurrency));
+    for (var i = 0; i < kTestConcurrency; i++) {
       expect(cached['vless://n$i'], -1);
     }
-    expect(cached.containsKey('vless://n19'), isFalse);
+    expect(cached.containsKey('vless://n${count - 1}'), isFalse);
   });
 
   test('merged cached delays are ordered by ascending delay after bootstrap', () async {

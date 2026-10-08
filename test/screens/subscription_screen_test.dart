@@ -29,7 +29,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
   });
 
-  testWidgets('lists the four default subscriptions by name', (tester) async {
+  testWidgets('lists the three default subscriptions by name', (tester) async {
     final v2rayService = V2rayService(FakeV2rayGateway());
     final controller = AppController(
       storage: StorageService(),
@@ -42,10 +42,9 @@ void main() {
 
     await tester.pumpWidget(MaterialApp(home: SubscriptionScreen(controller: controller)));
 
-    expect(find.text('freefq'), findsOneWidget);
     expect(find.text('Pawdroid'), findsOneWidget);
     expect(find.text('ermaozi'), findsOneWidget);
-    expect(find.text('V2RayAggregator'), findsOneWidget);
+    expect(find.text('mohammadaz2'), findsOneWidget);
   });
 
   testWidgets('shows formatted fetch time when lastFetchedAt is set', (tester) async {
