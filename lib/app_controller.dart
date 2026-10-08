@@ -30,6 +30,19 @@ class AppController extends ChangeNotifier {
   String statusMessage = '未连接';
   bool busy = false;
 
+  int retestDone = 0;
+  int retestTotal = 0;
+  bool _retestCancelled = false;
+
+  /// 正在批量测速中（用于 UI 显示进度条）。
+  bool get retesting => retestTotal > 0;
+
+  /// 请求中止正在进行的测速。已测到的结果保留，未测的保持「未测速」。
+  void cancelRetest() {
+    if (retestTotal == 0) return;
+    _retestCancelled = true;
+  }
+
   @visibleForTesting
   void debugSetNodesForTest(List<ProxyNode> testNodes) {
     nodes = testNodes;
@@ -43,18 +56,35 @@ class AppController extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> refreshSubscriptions() async {
+  /// 启动路径：先读本地存储，再拉一次订阅。**不自动测速**——
+  /// 默认源去重后有 554 个节点，全量测速要 1–6 分钟，何时开始由用户点「测速」决定。
+  Future<void> bootstrap() async {
+    await loadInitial();
+    await refreshSubscriptions(retest: false);
+  }
+
+  Future<void> refreshSubscriptions({bool retest = true}) async {
     busy = true;
     notifyListeners();
+
+    final manualOnly = nodes.where((n) => n.sourceSubId == 'manual').toList();
+
+    final enabled = subscriptions.where((s) => s.enabled).toList();
+    final results = await Future.wait(
+      enabled.map((s) => subscriptionService.fetchAndParse(s, client: _httpClient)),
+    );
+    final byId = {
+      for (var i = 0; i < enabled.length; i++) enabled[i].id: results[i],
+    };
 
     final fetched = <ProxyNode>[];
     final updatedSubs = <ProxySubscription>[];
     for (final sub in subscriptions) {
-      if (!sub.enabled) {
+      final result = byId[sub.id];
+      if (result == null) {          // 未启用的源：原样保留
         updatedSubs.add(sub);
         continue;
       }
-      final result = await subscriptionService.fetchAndParse(sub, client: _httpClient);
       fetched.addAll(result.nodes);
       updatedSubs.add(sub.copyWith(
         lastFetchedAt: DateTime.now(),
@@ -65,19 +95,59 @@ class AppController extends ChangeNotifier {
     }
 
     subscriptions = updatedSubs;
-
-    final manualOnly = nodes.where((n) => n.sourceSubId == 'manual').toList();
     nodes = dedupeNodes([...fetched, ...manualOnly]);
-
     await storage.saveSubscriptions(subscriptions);
-    busy = false;
-    notifyListeners();
+
+    if (retest) {
+      await _runRetest();            // spec §8：下拉刷新 = 重新拉订阅 + 全量重测
+    } else {
+      busy = false;
+      notifyListeners();
+    }
   }
 
   Future<void> retestAll() async {
     busy = true;
     notifyListeners();
-    nodes = await v2rayService.testDelays(nodes);
+    await _runRetest();
+  }
+
+  Future<void> _runRetest() async {
+    _retestCancelled = false;
+
+    if (nodes.isEmpty) {
+      retestTotal = 0;
+      retestDone = 0;
+      statusMessage = '还没有节点，请先刷新订阅';
+      busy = false;
+      notifyListeners();
+      return;
+    }
+
+    final input = nodes;   // 快照。注意：全程只「重赋值」nodes，绝不原地增删改，
+                           // 否则会破坏 testDelays 正在遍历的那个 list。
+    retestTotal = input.length;
+    retestDone = 0;
+    notifyListeners();
+
+    nodes = await v2rayService.testDelays(
+      input,
+      onProgress: (current, done, total) {
+        retestDone = done;
+        nodes = sortByDelay(current);   // spec §7.2/§8：实时回填 + 按延迟升序
+        notifyListeners();
+      },
+      shouldStop: () => _retestCancelled,
+    );
+    nodes = sortByDelay(nodes);
+
+    final usable = nodes.where((n) => n.delayMs != null && n.delayMs! >= 0).length;
+    statusMessage = _retestCancelled
+        ? '测速已停止（已完成 $retestDone/$retestTotal）'
+        : '测速完成 · $usable/${nodes.length} 个可用';
+
+    retestTotal = 0;
+    retestDone = 0;
     busy = false;
     notifyListeners();
   }

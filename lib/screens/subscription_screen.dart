@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../app_controller.dart';
+import '../models/subscription.dart';
 
 class SubscriptionScreen extends StatelessWidget {
   const SubscriptionScreen({super.key, required this.controller});
@@ -20,11 +21,7 @@ class SubscriptionScreen extends StatelessWidget {
                 value: sub.enabled,
                 onChanged: (_) => controller.toggleSubscription(sub.id),
                 title: Text(sub.name),
-                subtitle: Text(
-                  sub.lastError != null
-                      ? '失败：${sub.lastError}'
-                      : '节点数：${sub.nodeCount}',
-                ),
+                subtitle: Text(_subtitleFor(sub)),
                 secondary: IconButton(
                   icon: const Icon(Icons.delete_outline),
                   onPressed: () => controller.removeSubscription(sub.id),
@@ -39,6 +36,24 @@ class SubscriptionScreen extends StatelessWidget {
         );
       },
     );
+  }
+
+  /// 订阅行副标题：失败 > 未更新 > 更新时间，三者取优先级最高的一条。
+  static String _subtitleFor(ProxySubscription sub) {
+    if (sub.lastError != null) {
+      return '失败：${sub.lastError}';
+    }
+    if (sub.lastFetchedAt == null) {
+      return '节点数：${sub.nodeCount} · 未更新';
+    }
+    return '节点数：${sub.nodeCount} · 更新于 ${_formatFetchedAt(sub.lastFetchedAt!)}';
+  }
+
+  /// 手写时间格式化：M/d HH:mm（月日不补零，时分补零到两位）。
+  static String _formatFetchedAt(DateTime time) {
+    final hour = time.hour.toString().padLeft(2, '0');
+    final minute = time.minute.toString().padLeft(2, '0');
+    return '${time.month}/${time.day} $hour:$minute';
   }
 
   void _showAddDialog(BuildContext context) {

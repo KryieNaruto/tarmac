@@ -68,3 +68,24 @@ List<ProxyNode> dedupeNodes(List<ProxyNode> nodes) {
   }
   return result;
 }
+
+/// 按延迟排序：可用节点（delayMs 非 null 且 >= 0）按延迟升序排在前面；
+/// 未测速（null）与超时（< 0）保持它们原本的相对顺序、整体沉底。
+///
+/// 注意：这里用「稳定分区」而不是对整条 list 调 sort —— Dart 的 List.sort
+/// 不是稳定排序，会把未测速那一段每次打乱，列表会无谓地乱跳。
+List<ProxyNode> sortByDelay(List<ProxyNode> nodes) {
+  // 稳定分区：只对可用节点排序，其余按原相对顺序沉底。
+  final usable = <ProxyNode>[];
+  final rest = <ProxyNode>[];
+  for (final node in nodes) {
+    final delay = node.delayMs;
+    if (delay != null && delay >= 0) {
+      usable.add(node);
+    } else {
+      rest.add(node);
+    }
+  }
+  usable.sort((a, b) => a.delayMs!.compareTo(b.delayMs!));
+  return [...usable, ...rest];
+}

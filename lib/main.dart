@@ -38,7 +38,7 @@ class _TarmacAppState extends State<TarmacApp> {
       smartConnect: SmartConnectService(_v2rayService, HttpConnectivityProbe()),
     );
     _v2rayService.initialize();
-    _controller.loadInitial();
+    _controller.bootstrap();
   }
 
   @override

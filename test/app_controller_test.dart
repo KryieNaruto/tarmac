@@ -21,6 +21,15 @@ ProxyNode _testNode(String link, int delayMs) => ProxyNode(
       delayMs: delayMs,
     );
 
+/// 未测速节点（delayMs 为 null），用于测速/取消场景。
+ProxyNode _rawNode(String link) => ProxyNode(
+      id: link,
+      remark: link,
+      protocol: 'vless',
+      rawLink: link,
+      sourceSubId: 'manual',
+    );
+
 AppController _buildController({
   http.Client? httpClient,
   FakeV2rayGateway? gateway,
@@ -122,5 +131,93 @@ void main() {
 
     expect(controller.connectedNode, isNull);
     expect(controller.statusMessage, '未连接');
+  });
+
+  test('bootstrap() fetches subscriptions on the startup path (regression: node count was always 0)',
+      () async {
+    final client = MockClient((_) async => http.Response('vless://a@x:443#A', 200));
+    final controller = _buildController(httpClient: client);
+
+    await controller.bootstrap();
+
+    expect(controller.nodes, isNotEmpty);
+  });
+
+  test('bootstrap() does not auto-test: no delay data is written', () async {
+    final client = MockClient((_) async => http.Response('vless://a@x:443#A', 200));
+    final controller = _buildController(httpClient: client);
+
+    await controller.bootstrap();
+
+    expect(controller.nodes, isNotEmpty);
+    expect(controller.nodes.every((n) => n.delayMs == null), isTrue);
+  });
+
+  test('refreshSubscriptions(retest: false) leaves delays unset; retestAll backfills them', () async {
+    final gateway = FakeV2rayGateway(delayScript: {'vless://a@x:443#A': 42});
+    final client = MockClient((_) async => http.Response('vless://a@x:443#A', 200));
+    final controller = _buildController(httpClient: client, gateway: gateway);
+    await controller.loadInitial();
+
+    await controller.refreshSubscriptions(retest: false);
+    expect(controller.nodes, isNotEmpty);
+    expect(controller.nodes.every((n) => n.delayMs == null), isTrue);
+
+    await controller.retestAll();
+    final node = controller.nodes.firstWhere((n) => n.rawLink == 'vless://a@x:443#A');
+    expect(node.delayMs, 42);
+  });
+
+  test('retestAll sorts nodes by ascending delay', () async {
+    final gateway = FakeV2rayGateway(
+      delayScript: {'vless://slow': 200, 'vless://fast': 50},
+    );
+    final controller = _buildController(gateway: gateway);
+    controller.debugSetNodesForTest([
+      _rawNode('vless://slow'),
+      _rawNode('vless://fast'),
+    ]);
+
+    await controller.retestAll();
+
+    expect(
+      controller.nodes.map((n) => n.rawLink).toList(),
+      ['vless://fast', 'vless://slow'],
+    );
+  });
+
+  test('retestAll on an empty node list completes and reports a friendly status', () async {
+    final controller = _buildController();
+    await controller.loadInitial();
+    expect(controller.nodes, isEmpty);
+
+    await controller.retestAll();
+
+    expect(controller.statusMessage, contains('还没有节点'));
+    expect(controller.busy, isFalse);
+    expect(controller.retesting, isFalse);
+  });
+
+  test('cancelRetest keeps untested nodes and never fabricates their delays', () async {
+    final gate = Completer<void>();
+    final gateway = FakeV2rayGateway(gate: gate);
+    final controller = _buildController(gateway: gateway);
+    await controller.loadInitial();
+    controller.debugSetNodesForTest([
+      for (var i = 0; i < 20; i++) _rawNode('vless://n$i'),
+    ]);
+
+    // 不 await：让 retestAll 跑到闸门前挂起，再中途取消并放行。
+    final future = controller.retestAll();
+    await Future<void>.delayed(Duration.zero);
+    controller.cancelRetest();
+    gate.complete();
+    await future;
+
+    // 未测节点被保留、没丢。
+    expect(controller.nodes, hasLength(20));
+    expect(controller.statusMessage, contains('测速已停止'));
+    // 未测的节点延迟仍是 null，没有被编造。
+    expect(controller.nodes.any((n) => n.delayMs == null), isTrue);
   });
 }

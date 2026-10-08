@@ -105,4 +105,63 @@ void main() {
       expect(result.map((n) => n.id).toSet(), {'vless://x', 'vless://y'});
     });
   });
+
+  group('sortByDelay', () {
+    ProxyNode withDelay(String remark, int? delay) => ProxyNode(
+          id: remark,
+          remark: remark,
+          protocol: 'vless',
+          rawLink: 'vless://$remark',
+          sourceSubId: 'manual',
+          delayMs: delay,
+        );
+
+    test('usable nodes sorted ascending by delay, null/timeout sink to the tail', () {
+      final nodes = [
+        withDelay('a', 300),
+        withDelay('b', null),
+        withDelay('c', 50),
+        withDelay('d', -1),
+        withDelay('e', 100),
+      ];
+
+      final result = sortByDelay(nodes);
+
+      expect(result.map((n) => n.remark).toList(), ['c', 'e', 'a', 'b', 'd']);
+    });
+
+    test('untested/timed-out nodes keep their original relative order at the tail', () {
+      final nodes = [
+        withDelay('fast', 20),
+        withDelay('x', null),
+        withDelay('y', -1),
+        withDelay('z', null),
+        withDelay('slow', 900),
+      ];
+
+      final result = sortByDelay(nodes);
+
+      expect(result.take(2).map((n) => n.remark), ['fast', 'slow']);
+      expect(result.skip(2).map((n) => n.remark).toList(), ['x', 'y', 'z']);
+    });
+
+    test('all-null and empty lists do not throw', () {
+      expect(sortByDelay(const []), isEmpty);
+      final allNull = [withDelay('a', null), withDelay('b', null)];
+      expect(sortByDelay(allNull).map((n) => n.remark).toList(), ['a', 'b']);
+    });
+
+    test('does not mutate the input list', () {
+      final nodes = [
+        withDelay('a', 300),
+        withDelay('b', null),
+        withDelay('c', 50),
+      ];
+      final before = nodes.map((n) => n.remark).toList();
+
+      sortByDelay(nodes);
+
+      expect(nodes.map((n) => n.remark).toList(), before);
+    });
+  });
 }

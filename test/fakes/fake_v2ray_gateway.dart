@@ -9,11 +9,16 @@ class FakeV2rayGateway implements V2rayGateway {
     this._delayScript = const {},
     this.permissionGranted = true,
     this.startShouldThrow = false,
+    this.gate,
   });
 
   final Map<String, int?> _delayScript;
   final bool permissionGranted;
   final bool startShouldThrow;
+
+  /// 可选闸门：不为 null 时 `getServerDelay` 会先 await 它再返回脚本值，
+  /// 测试可用它卡住测速、中途 `cancelRetest()`、再放行。默认 null 行为不变。
+  final Completer<void>? gate;
 
   final _controller = StreamController<V2rayConnectionState>.broadcast();
   bool initialized = false;
@@ -26,7 +31,11 @@ class FakeV2rayGateway implements V2rayGateway {
   Future<bool> requestPermission() async => permissionGranted;
 
   @override
-  Future<int?> getServerDelay(String rawLink) async => _delayScript[rawLink];
+  Future<int?> getServerDelay(String rawLink) async {
+    final gate = this.gate;
+    if (gate != null) await gate.future;
+    return _delayScript[rawLink];
+  }
 
   @override
   Future<void> start({required String remark, required String rawLink}) async {
