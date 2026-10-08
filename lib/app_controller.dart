@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'models/proxy_node.dart';
@@ -15,13 +17,35 @@ class AppController extends ChangeNotifier {
     required this.v2rayService,
     required this.smartConnect,
     this._httpClient,
-  });
+  }) {
+    // 订阅插件状态流：隧道中途意外掉线（节点挂了 / 网络变了）时，
+    // 靠它把界面拉回真实状态，而不是一直骗用户「已连接」。
+    _stateSubscription =
+        v2rayService.stateStream.listen(_onConnectionStateChanged);
+  }
 
   final StorageService storage;
   final SubscriptionService subscriptionService;
   final V2rayService v2rayService;
   final SmartConnectService smartConnect;
   final http.Client? _httpClient;
+
+  /// 插件状态流订阅句柄，[dispose] 时取消。
+  late final StreamSubscription<V2rayConnectionState> _stateSubscription;
+
+  /// 我方主动断开隧道时置真：状态流紧接着发出的 disconnected 属于预期，
+  /// 不能当成「意外掉线」去触发自动重连。
+  bool _intentionalDisconnect = false;
+
+  /// 意外掉线后已自动重连的次数；连上成功即归零，防止死循环。
+  int _autoReconnectAttempts = 0;
+  static const _kMaxAutoReconnectAttempts = 3;
+
+  @override
+  void dispose() {
+    _stateSubscription.cancel();
+    super.dispose();
+  }
 
   List<ProxySubscription> subscriptions = [];
   List<ProxyNode> nodes = [];
@@ -237,7 +261,8 @@ class AppController extends ChangeNotifier {
 
     // 把可能还在跑的级联取消，并把旧隧道收干净，避免叠隧道。
     smartConnect.cancel();
-    await v2rayService.disconnect();
+    // 主动收掉旧隧道（打标，避免被状态流当成意外掉线）。
+    await _disconnectIntentionally();
 
     busy = true;
     _huntCancelled = false;
@@ -311,6 +336,7 @@ class AppController extends ChangeNotifier {
             connectionState = V2rayConnectionState.connected;
             statusMessage = '已连接 · ${node.remark}';
             await storage.saveLastConnectedNodeId(node.id);
+            _autoReconnectAttempts = 0; // 连上了就重置，避免跨会话累计到上限后永久放弃
             return;   // 猎取成功，finally 仍会复位状态
           }
           // 失败（权限被拒 / 经该节点取不到数据）→ 继续这一批的下一个。
@@ -318,7 +344,7 @@ class AppController extends ChangeNotifier {
       }
 
       // 全部走完 / 超预算 / 被取消：确保断开、状态一致。
-      await v2rayService.disconnect();
+      await _disconnectIntentionally();
       connectedNode = null;
       connectionState = V2rayConnectionState.disconnected;
       statusMessage = _huntCancelled
@@ -346,7 +372,8 @@ class AppController extends ChangeNotifier {
     try {
       // 先把可能还在跑的级联取消，并把旧隧道收干净，避免叠隧道。
       smartConnect.cancel();
-      await v2rayService.disconnect();
+      // 主动收掉旧隧道（打标，避免被状态流当成意外掉线）。
+      await _disconnectIntentionally();
 
       busy = true;
       statusMessage = '正在连接 · ${node.remark}';
@@ -365,6 +392,7 @@ class AppController extends ChangeNotifier {
           connectionState = V2rayConnectionState.connected;
           statusMessage = '已连接 · ${node.remark}';
           await storage.saveLastConnectedNodeId(node.id);
+          _autoReconnectAttempts = 0; // 连上了就重置，避免跨会话累计到上限后永久放弃
           break;
         case ConnectOutcome.permissionDenied:
           connectedNode = null;
@@ -387,12 +415,76 @@ class AppController extends ChangeNotifier {
 
   Future<void> disconnectNow() async {
     smartConnect.cancel();
-    await v2rayService.disconnect();
+    await _disconnectIntentionally();
     connectedNode = null;
     connectionState = V2rayConnectionState.disconnected;
     statusMessage = '未连接';
+    // 用户主动断开：重置自动重连计数，让下次是全新的开始。
+    _autoReconnectAttempts = 0;
     await storage.saveLastConnectedNodeId(null);
     notifyListeners();
+  }
+
+  /// 我方主动断开隧道：打标以免紧随其后的状态流事件被误判为「意外掉线」。
+  Future<void> _disconnectIntentionally() async {
+    _intentionalDisconnect = true;
+    try {
+      await v2rayService.disconnect();
+    } finally {
+      _intentionalDisconnect = false;
+    }
+  }
+
+  /// 插件状态流的回调：把真实隧道状态同步到界面，并在**意外掉线**时自动重连。
+  void _onConnectionStateChanged(V2rayConnectionState state) {
+    // 有操作在跑时不去抢状态：猎取 / 测速 / 连接流程自己会写终态。
+    // （也顺带挡住 connectAndVerify 内部失败时自己 disconnect 发出的那些事件。）
+    if (busy) return;
+
+    // 我方主动断开：不当作意外掉线。
+    if (_intentionalDisconnect) {
+      if (connectionState != V2rayConnectionState.disconnected) {
+        connectionState = V2rayConnectionState.disconnected;
+        notifyListeners();
+      }
+      return;
+    }
+
+    if (state == V2rayConnectionState.connected) {
+      if (connectionState != V2rayConnectionState.connected) {
+        connectionState = V2rayConnectionState.connected;
+        notifyListeners();
+      }
+      _autoReconnectAttempts = 0; // 连上了就重置计数
+      return;
+    }
+
+    // state == disconnected
+    final wasConnected = connectionState == V2rayConnectionState.connected;
+    connectionState = V2rayConnectionState.disconnected;
+    connectedNode = null;
+    notifyListeners();
+
+    // 只有「本来连着、却意外断了」才自动重连，且有次数上限防止死循环。
+    if (wasConnected) {
+      unawaited(_handleUnexpectedDrop());
+    }
+  }
+
+  /// 意外掉线 → 复用「自动猎取」重新找一个当下可达的节点。
+  Future<void> _handleUnexpectedDrop() async {
+    if (_autoReconnectAttempts >= _kMaxAutoReconnectAttempts) {
+      statusMessage = '连接已断开，自动重连多次失败，请手动重试';
+      notifyListeners();
+      return;
+    }
+    _autoReconnectAttempts++;
+    statusMessage = '连接已断开，正在自动重连（第 $_autoReconnectAttempts 次）…';
+    notifyListeners();
+    // 直接复用自动猎取：它会自己找当下可达的节点并在成功时重置状态。
+    // 刻意不 await 这个 Future —— 重连在后台跑，成功/失败都会经由
+    // notifyListeners 反映到界面；上层回调是同步 void，不能 await。
+    await smartConnectNow();
   }
 
   Future<void> addSubscription(String name, String url) async {

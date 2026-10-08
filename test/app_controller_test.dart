@@ -509,4 +509,87 @@ void main() {
     expect(controller.busy, isTrue);
     expect(gateway.lastStartedRawLink, isNull);
   });
+
+  test('意外掉线会触发自动重连并最终重新连上', () async {
+    final gateway = FakeV2rayGateway(
+      delayScript: {'vless://a': 10},
+      connectedDelays: [50],
+    );
+    final controller = _buildController(gateway: gateway);
+    await controller.loadInitial();
+    controller.debugSetNodesForTest([_testNode('vless://a', 10)]);
+
+    await controller.connectToNode(_testNode('vless://a', 10));
+    expect(controller.connectionState, V2rayConnectionState.connected);
+    expect(controller.connectedNode, isNotNull);
+
+    // 重连成功后文案会被覆盖成「已连接」，所以「自动重连」这条中间态
+    // 只能靠监听器把历次 statusMessage 记下来。
+    final seen = <String>[];
+    controller.addListener(() => seen.add(controller.statusMessage));
+
+    gateway.emitState(V2rayConnectionState.disconnected);
+    await pumpEventQueue();
+
+    expect(seen.any((s) => s.contains('自动重连')), isTrue,
+        reason: '应当先给出自动重连提示');
+    expect(controller.connectedNode, isNotNull, reason: '应当重连成功');
+    expect(controller.connectionState, V2rayConnectionState.connected);
+    expect(controller.busy, isFalse);
+  });
+
+  test('用户主动断开不会触发自动重连', () async {
+    final gateway = FakeV2rayGateway(connectedDelays: [50]);
+    final controller = _buildController(gateway: gateway);
+    await controller.loadInitial();
+    await controller.connectToNode(_testNode('vless://a', 10));
+    expect(controller.connectionState, V2rayConnectionState.connected);
+
+    await controller.disconnectNow();
+    await pumpEventQueue();
+
+    expect(controller.statusMessage, '未连接');
+    expect(controller.statusMessage, isNot(contains('自动重连')));
+    expect(controller.connectedNode, isNull);
+  });
+
+  test('有操作在跑(busy)时不抢连接状态', () async {
+    final gateway = FakeV2rayGateway(connectedDelays: [50]);
+    final controller = _buildController(gateway: gateway);
+    await controller.loadInitial();
+    await controller.connectToNode(_testNode('vless://a', 10));
+    expect(controller.connectionState, V2rayConnectionState.connected);
+
+    controller.busy = true;
+    gateway.emitState(V2rayConnectionState.disconnected);
+    await pumpEventQueue();
+
+    // busy 守卫生效：进行中的操作自己会写终态，状态流期间不得抢改。
+    expect(controller.connectionState, V2rayConnectionState.connected);
+    expect(controller.connectedNode, isNotNull);
+
+    controller.busy = false;
+  });
+
+  test('自动重连有次数上限，超过后提示手动重试', () async {
+    // 猎取必然失败：节点没有脚本延迟 -> 测出 -1 -> 永不被当作候选，
+    // 所以整条猎取链路瞬时结束。刻意不用 connectedDelays: const []
+    // 那条路径，因为重连内部调用的是生产默认参数（8s 实测窗口），
+    // 注入不了极短窗口，会把测试拖慢。
+    final gateway = FakeV2rayGateway(connectedDelays: [50]);
+    final controller = _buildController(gateway: gateway);
+    await controller.loadInitial();
+    controller.debugSetNodesForTest([_rawNode('vless://a')]);
+
+    for (var i = 0; i < 5; i++) {
+      // 手工摆回「已连接」以模拟又一次意外掉线。不走状态流的 connected
+      // 事件，否则会把自动重连计数归零、永远到不了上限。
+      controller.connectionState = V2rayConnectionState.connected;
+      gateway.emitState(V2rayConnectionState.disconnected);
+      await pumpEventQueue();
+    }
+
+    expect(controller.statusMessage, contains('请手动重试'));
+    expect(controller.busy, isFalse);
+  });
 }

@@ -76,4 +76,7 @@ class FakeV2rayGateway implements V2rayGateway {
 
   @override
   Stream<V2rayConnectionState> get stateStream => _controller.stream;
+
+  /// 测试钩子：手工把一条状态推给订阅者，用于模拟隧道意外掉线等场景。
+  void emitState(V2rayConnectionState s) => _controller.add(s);
 }
