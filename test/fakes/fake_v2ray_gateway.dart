@@ -11,6 +11,7 @@ class FakeV2rayGateway implements V2rayGateway {
     this.startShouldThrow = false,
     this.gate,
     List<int?> connectedDelays = const [],
+    this.connectedDelayByUrl,
     this.pending,
   }) : _connectedDelays = List.of(connectedDelays);
 
@@ -26,6 +27,10 @@ class FakeV2rayGateway implements V2rayGateway {
   /// （消费到最后一个元素后即固定返回它，列表不会被耗尽）。
   /// 空列表 = 永远取不到数据（null）。
   final List<int?> _connectedDelays;
+
+  /// 按 URL 指定 getConnectedDelay 的返回值（url -> delayMs；null/缺失 = 取不到）。
+  /// 给 null 时退回既有的 `connectedDelays` 顺序消费行为。
+  final Map<String, int?>? connectedDelayByUrl;
 
   /// 可选闸门：不为 null 时 `getConnectedDelay` 会 await 它，测试可用它
   /// 卡住「核心实测」、制造取消竞态。默认 null 行为不变。
@@ -52,6 +57,8 @@ class FakeV2rayGateway implements V2rayGateway {
   Future<int?> getConnectedDelay(String url) async {
     final pending = this.pending;
     if (pending != null) return pending.future;
+    final byUrl = connectedDelayByUrl;
+    if (byUrl != null) return byUrl[url];
     if (_connectedDelays.isEmpty) return null;
     return _connectedDelays.length == 1
         ? _connectedDelays.first

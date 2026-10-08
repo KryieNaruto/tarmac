@@ -276,6 +276,10 @@ class AppController extends ChangeNotifier {
 
     final deadline = DateTime.now().add(huntBudget);
 
+    // 记住第一个「主目标通、部分目标（Twitter）不通」的节点：
+    // 先继续找有没有能全通的，全都找不着再回退连它。
+    ProxyNode? bestPartial;
+
     try {
       final queue = _huntOrder(nodes);   // 快照：局部不变，nodes 另行重赋值
       for (var start = 0; start < queue.length; start += batchSize) {
@@ -342,7 +346,31 @@ class AppController extends ChangeNotifier {
             _autoReconnectAttempts = 0; // 连上了就重置，避免跨会话累计到上限后永久放弃
             return;   // 猎取成功，finally 仍会复位状态
           }
-          // 失败（权限被拒 / 经该节点取不到数据）→ 继续这一批的下一个。
+          if (outcome == ConnectOutcome.verifiedPartial) {
+            // 只差 Twitter：先记住它，继续找后面有没有能全通的节点；
+            // 不在这里 return —— 队列后面可能还有全通的。
+            bestPartial ??= node;
+          }
+          // 失败（权限被拒 / 主目标取不到数据）→ 继续这一批的下一个。
+        }
+      }
+
+      // 队列耗尽 / 超预算 / 未取消：若找到过「只差 Twitter」的节点，回退连它，
+      // 比什么都连不上对用户有用得多。被取消时（用户明确按了停止）不回退。
+      final partial = bestPartial;
+      if (!_huntCancelled && partial != null) {
+        final fallback = await smartConnect.connectAndVerify(
+          partial,
+          establishWindow: verifyWindow,
+        );
+        if (fallback == ConnectOutcome.verified ||
+            fallback == ConnectOutcome.verifiedPartial) {
+          connectedNode = partial;
+          connectionState = V2rayConnectionState.connected;
+          statusMessage = '已连接 · ${partial.remark}（Twitter 不可用）';
+          await storage.saveLastConnectedNodeId(partial.id);
+          _autoReconnectAttempts = 0; // 连上了就重置，避免跨会话累计到上限后永久放弃
+          return;   // 回退成功，finally 仍会复位状态
         }
       }
 
@@ -394,6 +422,15 @@ class AppController extends ChangeNotifier {
           connectedNode = node;
           connectionState = V2rayConnectionState.connected;
           statusMessage = '已连接 · ${node.remark}';
+          await storage.saveLastConnectedNodeId(node.id);
+          _autoReconnectAttempts = 0; // 连上了就重置，避免跨会话累计到上限后永久放弃
+          break;
+        case ConnectOutcome.verifiedPartial:
+          // 主目标（Google）通、部分目标（Twitter）不通：仍保留连接，
+          // 比把用户丢回「什么都没连上」有用得多。
+          connectedNode = node;
+          connectionState = V2rayConnectionState.connected;
+          statusMessage = '已连接 · ${node.remark}（Twitter 不可用）';
           await storage.saveLastConnectedNodeId(node.id);
           _autoReconnectAttempts = 0; // 连上了就重置，避免跨会话累计到上限后永久放弃
           break;

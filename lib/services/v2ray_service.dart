@@ -41,9 +41,29 @@ class V2rayService {
   /// 因为这是核心经代理发出的请求，不是本机直连）。
   static const kVerifyUrl = 'https://www.google.com/generate_204';
 
+  /// 连通性校验的目标集合。**全部**通过才算「完全可用」。
+  /// 用 twitter.com 主站（不是 abs.twimg.com —— 那个 CDN 域名对机房 IP 是通的，
+  /// 拿它校验会把「过不了 X」的节点误判为可用）。
+  static const kVerifyUrls = <String>[
+    'https://www.google.com/generate_204',
+    'https://twitter.com/robots.txt',
+  ];
+
+  /// 主校验目标：至少要能过它，才谈得上「能用」。
+  static const kPrimaryVerifyUrl = 'https://www.google.com/generate_204';
+
   /// 连上后经核心实测一次；成功返回毫秒数，取不到数据返回 null。
   Future<int?> verifyConnected({String url = kVerifyUrl}) =>
       _gateway.getConnectedDelay(url);
+
+  /// 经核心逐个实测 [urls]；**全部**成功才返回 true（任一失败即 false）。
+  Future<bool> verifyAll(List<String> urls) async {
+    for (final url in urls) {
+      final delay = await verifyConnected(url: url);
+      if (delay == null || delay <= 0) return false;
+    }
+    return true;
+  }
 
   Future<bool> connect(ProxyNode node) async {
     final granted = await _gateway.requestPermission();

@@ -15,6 +15,10 @@ enum ConnectOutcome {
   /// 已连接，且经该节点实测通过。
   verified,
 
+  /// 连上了、主目标（Google）通，但部分目标（如 Twitter）不通。
+  /// 仍然保留连接 —— 比"什么都没连上"对用户有用得多。
+  verifiedPartial,
+
   /// 未授予 VPN 权限，连接未启动。
   permissionDenied,
 
@@ -88,14 +92,18 @@ class SmartConnectService {
     return SmartConnectOutcome(result: SmartConnectResult.allFailed);
   }
 
-  /// 连接指定节点，并让核心经该节点实测一次请求。
-  /// 返回 [ConnectOutcome] 如实区分失败原因；只有「起了但取不到数据」这条
-  /// 才**自己断开**，其余（权限被拒）根本没起隧道，不该 disconnect。
+  /// 连接指定节点，并让核心经该节点**两级**实测：
+  ///   1) 先只校验主目标 [primaryUrl]（「能用」的门槛）；
+  ///   2) 主目标通过后再逐个校验 [verifyUrls] 里其余的（Twitter 等）。
+  /// 返回 [ConnectOutcome] 如实区分失败原因；只有「起了但（主目标）取不到数据」
+  /// 这条才**自己断开**，其余（权限被拒）根本没起隧道，不该 disconnect；
+  /// 「主目标通、部分目标不通」保持连接。
   Future<ConnectOutcome> connectAndVerify(
     ProxyNode node, {
     Duration establishWindow = const Duration(seconds: 10),
     Duration pollInterval = const Duration(milliseconds: 800),
-    String verifyUrl = V2rayService.kVerifyUrl,
+    List<String> verifyUrls = V2rayService.kVerifyUrls,
+    String primaryUrl = V2rayService.kPrimaryVerifyUrl,
   }) async {
     // 每次操作重新开始，与 connectBest 一致（此前可能被 cancel() 置过 true）。
     _cancelled = false;
@@ -104,13 +112,36 @@ class SmartConnectService {
       node,
       establishWindow: establishWindow,
       pollInterval: pollInterval,
-      verifyUrl: verifyUrl,
+      verifyUrl: primaryUrl,   // 第一级：先只校验主目标
     );
 
     if (result == null) return ConnectOutcome.permissionDenied; // connect 未启动，没起隧道
-    if (result) return ConnectOutcome.verified;                 // 校验通过：保持连接
-    await _v2ray.disconnect();                                  // 起了但取不到数据：自己收干净
-    return ConnectOutcome.proxyUnavailable;
+    if (!result) {
+      // 主目标就不通 → 起了但取不到数据：自己收干净。
+      await _v2ray.disconnect();
+      return ConnectOutcome.proxyUnavailable;
+    }
+
+    // 第二级：主目标已通，保持连接，再逐个校验其余目标。
+    for (final url in verifyUrls) {
+      if (url == primaryUrl) continue;   // 主目标已校验过，别重复
+      if (_cancelled) {
+        // 取消：与既有语义一致——断开并报「取不到数据」（connectAndVerify
+        // 没有独立的 cancelled 返回值），由调用方据自身取消标志决定终态。
+        await _v2ray.disconnect();
+        return ConnectOutcome.proxyUnavailable;
+      }
+      final delay = await _v2ray.verifyConnected(url: url);
+      if (_cancelled) {
+        await _v2ray.disconnect();
+        return ConnectOutcome.proxyUnavailable;
+      }
+      if (delay == null || delay <= 0) {
+        // 部分目标不通：**保持连接**（partial 也比什么都没连上强）。
+        return ConnectOutcome.verifiedPartial;
+      }
+    }
+    return ConnectOutcome.verified;   // 全部通过：保持连接
   }
 
   /// 发起连接并等待核心经该节点实测通过。

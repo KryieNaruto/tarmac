@@ -620,4 +620,62 @@ void main() {
     expect(controller.statusMessage, contains('请手动重试'));
     expect(controller.busy, isFalse);
   });
+
+  test('smartConnectNow 优先挑全通节点：partial 先被记住，后面全通者胜出', () async {
+    final gateway = FakeV2rayGateway(
+      delayScript: {'vless://p': 10, 'vless://f': 20},
+      // 调用顺序 = 每个候选先 google 后 twitter：
+      //   p: google 50 ✓ / twitter -1 ✗ → partial，先记住
+      //   f: google 50 ✓ / twitter 50 ✓ → verified，胜出
+      connectedDelays: [50, -1, 50, 50],
+    );
+    final controller = _buildController(gateway: gateway);
+    await controller.loadInitial();
+    controller.debugSetNodesForTest([
+      _testNode('vless://p', 10),
+      _testNode('vless://f', 20),
+    ]);
+
+    await controller.smartConnectNow(verifyWindow: Duration.zero);
+
+    expect(controller.connectedNode?.id, 'vless://f');
+    expect(controller.statusMessage, isNot(contains('Twitter 不可用')));
+    expect(controller.statusMessage, contains('已连接'));
+    expect(controller.busy, isFalse);
+  });
+
+  test('smartConnectNow 没有全通节点时回退连上 partial（Twitter 不可用）', () async {
+    final gateway = FakeV2rayGateway(
+      delayScript: {'vless://p': 10},
+      // p: google 50 ✓ / twitter -1 ✗ → partial；
+      // 回退再连一次同样是 google 50 ✓ / twitter -1 ✗ → partial，保持连接。
+      connectedDelays: [50, -1, 50, -1],
+    );
+    final controller = _buildController(gateway: gateway);
+    await controller.loadInitial();
+    controller.debugSetNodesForTest([_testNode('vless://p', 10)]);
+
+    await controller.smartConnectNow(verifyWindow: Duration.zero);
+
+    expect(controller.connectedNode?.id, 'vless://p');
+    expect(controller.connectionState, V2rayConnectionState.connected);
+    expect(controller.statusMessage, contains('Twitter 不可用'));
+    expect(controller.busy, isFalse);
+  });
+
+  test('smartConnectNow 主目标也不通时报告失败，且不回退 partial', () async {
+    final gateway = FakeV2rayGateway(
+      delayScript: {'vless://p': 10},
+      connectedDelays: const [], // 核心经该节点始终取不到数据（主目标就不过）
+    );
+    final controller = _buildController(gateway: gateway);
+    await controller.loadInitial();
+    controller.debugSetNodesForTest([_testNode('vless://p', 10)]);
+
+    await controller.smartConnectNow(verifyWindow: Duration.zero);
+
+    expect(controller.statusMessage, contains('找不到可用节点'));
+    expect(controller.connectedNode, isNull);
+    expect(controller.busy, isFalse);
+  });
 }

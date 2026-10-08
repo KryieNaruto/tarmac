@@ -201,4 +201,66 @@ void main() {
     // connect 返回 false（权限被拒）→ 根本没起隧道，也就没必要 disconnect。
     expect(gateway.lastStartedRawLink, isNull);
   });
+
+  test('两个校验目标都通 → verified，且保持连接', () async {
+    final gateway = FakeV2rayGateway(connectedDelayByUrl: {
+      V2rayService.kPrimaryVerifyUrl: 50,
+      'https://twitter.com/robots.txt': 50,
+    });
+    final service = SmartConnectService(V2rayService(gateway));
+
+    final outcome = await service.connectAndVerify(_node('a', 50), pollInterval: Duration.zero);
+
+    expect(outcome, ConnectOutcome.verified);
+    // 全通 → 保持连接，不得 disconnect（stop() 会把它清成 null）。
+    expect(gateway.lastStartedRawLink, 'a');
+  });
+
+  test('只有主目标（Google）通、Twitter 不通 → verifiedPartial，且仍保持连接', () async {
+    final gateway = FakeV2rayGateway(connectedDelayByUrl: {
+      V2rayService.kPrimaryVerifyUrl: 50,
+      'https://twitter.com/robots.txt': null, // Twitter 传输层断连 → 取不到数据
+    });
+    final service = SmartConnectService(V2rayService(gateway));
+
+    final outcome = await service.connectAndVerify(_node('a', 50), pollInterval: Duration.zero);
+
+    expect(outcome, ConnectOutcome.verifiedPartial);
+    // 本改动的核心：partial 也必须保持连接，绝不能断。
+    expect(gateway.lastStartedRawLink, 'a');
+  });
+
+  test('主目标就不通 → proxyUnavailable，且已断开', () async {
+    final gateway = FakeV2rayGateway(connectedDelayByUrl: {
+      V2rayService.kPrimaryVerifyUrl: null, // 主目标取不到数据
+      'https://twitter.com/robots.txt': 50, // 即便 Twitter「通」也不能算可用
+    });
+    final service = SmartConnectService(V2rayService(gateway));
+
+    final outcome = await service.connectAndVerify(
+      _node('a', 50),
+      establishWindow: Duration.zero,
+      pollInterval: Duration.zero,
+    );
+
+    expect(outcome, ConnectOutcome.proxyUnavailable);
+    // 主目标不通 → 自己断开，不留半死的隧道。
+    expect(gateway.lastStartedRawLink, isNull);
+  });
+
+  test('多目标签名下未授权 → permissionDenied，且不起隧道', () async {
+    final gateway = FakeV2rayGateway(
+      permissionGranted: false,
+      connectedDelayByUrl: {
+        V2rayService.kPrimaryVerifyUrl: 50,
+        'https://twitter.com/robots.txt': 50,
+      },
+    );
+    final service = SmartConnectService(V2rayService(gateway));
+
+    final outcome = await service.connectAndVerify(_node('a', 50), pollInterval: Duration.zero);
+
+    expect(outcome, ConnectOutcome.permissionDenied);
+    expect(gateway.lastStartedRawLink, isNull);
+  });
 }
