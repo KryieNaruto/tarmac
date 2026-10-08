@@ -91,6 +91,118 @@ void main() {
 
       expect(result.nodes, isEmpty);
     });
+
+    // 以下为「重试 / 超时」行为测试。为避免真等退避时间，
+    // 重试类测试一律传 retryBackoff: Duration.zero。
+
+    test('retries once after a connection failure and succeeds on the second attempt', () async {
+      var calls = 0;
+      final client = MockClient((request) async {
+        calls++;
+        if (calls == 1) throw http.ClientException('connection reset');
+        return http.Response('vless://a@x:443#A', 200);
+      });
+      final service = SubscriptionService();
+      final sub = ProxySubscription(id: 'r1', name: 'R1', url: 'https://x/retry');
+
+      final result =
+          await service.fetchAndParse(sub, client: client, retryBackoff: Duration.zero);
+
+      expect(result.nodes, isNotEmpty);
+      expect(result.error, isNull);
+      expect(calls, 2);
+    });
+
+    test('gives up after all attempts fail, with exactly maxAttempts calls', () async {
+      var calls = 0;
+      final client = MockClient((request) async {
+        calls++;
+        throw http.ClientException('connection reset');
+      });
+      final service = SubscriptionService();
+      final sub = ProxySubscription(id: 'r2', name: 'R2', url: 'https://x/down');
+
+      final result =
+          await service.fetchAndParse(sub, client: client, retryBackoff: Duration.zero);
+
+      expect(result.nodes, isEmpty);
+      expect(result.error, isNotNull);
+      expect(calls, 2);
+    });
+
+    test('does not retry on 404 (client error)', () async {
+      var calls = 0;
+      final client = MockClient((request) async {
+        calls++;
+        return http.Response('', 404);
+      });
+      final service = SubscriptionService();
+      final sub = ProxySubscription(id: 'r3', name: 'R3', url: 'https://x/missing');
+
+      final result =
+          await service.fetchAndParse(sub, client: client, retryBackoff: Duration.zero);
+
+      expect(result.error, contains('404'));
+      expect(calls, 1);
+    });
+
+    test('retries on HTTP 500 and succeeds on the second attempt', () async {
+      var calls = 0;
+      final client = MockClient((request) async {
+        calls++;
+        if (calls == 1) return http.Response('', 500);
+        return http.Response('vless://a@x:443#A', 200);
+      });
+      final service = SubscriptionService();
+      final sub = ProxySubscription(id: 'r4', name: 'R4', url: 'https://x/flaky');
+
+      final result =
+          await service.fetchAndParse(sub, client: client, retryBackoff: Duration.zero);
+
+      expect(result.nodes, isNotEmpty);
+      expect(result.error, isNull);
+      expect(calls, 2);
+    });
+
+    test('maxAttempts: 1 disables retries', () async {
+      var calls = 0;
+      final client = MockClient((request) async {
+        calls++;
+        return http.Response('', 500);
+      });
+      final service = SubscriptionService();
+      final sub = ProxySubscription(id: 'r5', name: 'R5', url: 'https://x/once');
+
+      final result = await service.fetchAndParse(
+        sub,
+        client: client,
+        maxAttempts: 1,
+        retryBackoff: Duration.zero,
+      );
+
+      expect(calls, 1);
+      expect(result.error, isNotNull);
+    });
+
+    test('enforces the per-attempt timeout', () async {
+      final client = MockClient((request) async {
+        await Future.delayed(const Duration(milliseconds: 200));
+        return http.Response('', 200);
+      });
+      final service = SubscriptionService();
+      final sub = ProxySubscription(id: 'r6', name: 'R6', url: 'https://x/slow');
+
+      final result = await service.fetchAndParse(
+        sub,
+        client: client,
+        timeout: const Duration(milliseconds: 20),
+        maxAttempts: 1,
+      );
+
+      expect(result.error, isNotNull);
+      // 宽匹配：具体的超时异常文案随 SDK 变化，不去钉死。
+      expect(result.error, contains('imeout'));
+    });
   });
 
   group('dedupeNodes', () {
