@@ -1,9 +1,12 @@
 import '../models/proxy_node.dart';
+import 'tunnel_probe.dart';
 import 'v2ray_gateway.dart';
 
 class V2rayService {
-  V2rayService(this._gateway);
+  V2rayService(this._gateway, {TunnelProbe? probe})
+      : _probe = probe ?? SocksTunnelProbe();
   final V2rayGateway _gateway;
+  final TunnelProbe _probe;
 
   Future<void> initialize() => _gateway.initialize();
 
@@ -52,9 +55,21 @@ class V2rayService {
   /// 主校验目标：至少要能过它，才谈得上「能用」。
   static const kPrimaryVerifyUrl = 'https://www.google.com/generate_204';
 
-  /// 连上后经核心实测一次；成功返回毫秒数，取不到数据返回 null。
-  Future<int?> verifyConnected({String url = kVerifyUrl}) =>
-      _gateway.getConnectedDelay(url);
+  /// 连上后经核心的 SOCKS5 inbound 实测一次「能否到达该目标」。
+  ///
+  /// 返回的 `1` 只是「通」的占位，**不是真实毫秒数** —— 延迟数字在这里已无意义
+  /// （校验只关心通/不通）。返回 null 表示不通。保留 `Future<int?>` 的返回类型，
+  /// 是因为 [SmartConnectService] 依赖它（非 null 即「通」）。
+  Future<int?> verifyConnected({String url = kVerifyUrl}) async {
+    final uri = Uri.tryParse(url);
+    if (uri == null || uri.host.isEmpty) return null;
+    final ok = await _probe.canReach(
+      uri.host,
+      port: uri.hasPort ? uri.port : (uri.scheme == 'https' ? 443 : 80),
+      path: uri.path.isEmpty ? '/' : uri.path,
+    );
+    return ok ? 1 : null; // 只表达「通/不通」
+  }
 
   /// 经核心逐个实测 [urls]；**全部**成功才返回 true（任一失败即 false）。
   Future<bool> verifyAll(List<String> urls) async {

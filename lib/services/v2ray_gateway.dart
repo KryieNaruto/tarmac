@@ -9,10 +9,6 @@ abstract class V2rayGateway {
   Future<bool> requestPermission();
   Future<int?> getServerDelay(String rawLink);
 
-  /// 通过**当前已连接**的核心实测一次请求（走活动代理）。
-  /// 成功返回毫秒数；核心未连接 / 超时 / 取不到数据一律返回 null。
-  Future<int?> getConnectedDelay(String url);
-
   Future<void> start({required String remark, required String rawLink});
   Future<void> stop();
   Stream<V2rayConnectionState> get stateStream;
@@ -49,16 +45,6 @@ class FlutterV2rayGateway implements V2rayGateway {
     try {
       final parser = V2ray.parseFromURL(rawLink);
       return await _v2ray.getServerDelay(config: parser.getFullConfiguration());
-    } catch (_) {
-      return null;
-    }
-  }
-
-  @override
-  Future<int?> getConnectedDelay(String url) async {
-    try {
-      final delay = await _v2ray.getConnectedServerDelay(url: url);
-      return delay > 0 ? delay : null; // 插件的失败返回值 <= 0
     } catch (_) {
       return null;
     }

@@ -11,6 +11,7 @@ import 'package:tarmac/services/smart_connect_service.dart';
 import 'package:tarmac/services/storage_service.dart';
 import 'package:tarmac/services/subscription_service.dart';
 import 'package:tarmac/services/v2ray_service.dart';
+import '../fakes/fake_tunnel_probe.dart';
 import '../fakes/fake_v2ray_gateway.dart';
 
 void main() {
@@ -162,8 +163,14 @@ void main() {
   });
 
   testWidgets('tapping a node row connects to that node', (tester) async {
-    // 核心经该节点实测返回 50ms → 手动连接被判定为「已连接」。
-    final v2rayService = V2rayService(FakeV2rayGateway(connectedDelays: [50]));
+    // 校验目标（与 V2rayService.kVerifyUrls 一致）全部可达
+    // → 手动连接被判定为「已连接」。
+    final v2rayService = V2rayService(
+      FakeV2rayGateway(),
+      probe: FakeTunnelProbe(
+        reachable: const {'www.google.com', 'twitter.com'},
+      ),
+    );
     final controller = AppController(
       storage: StorageService(),
       subscriptionService: SubscriptionService(),

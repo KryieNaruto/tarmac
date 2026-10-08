@@ -8,8 +8,10 @@ import 'package:tarmac/models/proxy_node.dart';
 import 'package:tarmac/services/smart_connect_service.dart';
 import 'package:tarmac/services/storage_service.dart';
 import 'package:tarmac/services/subscription_service.dart';
+import 'package:tarmac/services/tunnel_probe.dart';
 import 'package:tarmac/services/v2ray_gateway.dart';
 import 'package:tarmac/services/v2ray_service.dart';
+import 'fakes/fake_tunnel_probe.dart';
 import 'fakes/fake_v2ray_gateway.dart';
 
 ProxyNode _testNode(String link, int delayMs) => ProxyNode(
@@ -30,12 +32,30 @@ ProxyNode _rawNode(String link) => ProxyNode(
       sourceSubId: 'manual',
     );
 
+/// 校验目标的 host（与 [V2rayService.kVerifyUrls] 一致）。
+const String _googleHost = 'www.google.com';
+const String _twitterHost = 'twitter.com';
+
+/// 经隧道所有目标都可达。
+FakeTunnelProbe _allReachable() =>
+    FakeTunnelProbe(reachable: const {_googleHost, _twitterHost});
+
+/// 只通主目标（Google），Twitter 不通。
+FakeTunnelProbe _onlyGoogle() =>
+    FakeTunnelProbe(reachable: const {_googleHost});
+
+/// 什么都到不了。
+FakeTunnelProbe _nothingReachable() => FakeTunnelProbe();
+
 AppController _buildController({
   http.Client? httpClient,
   FakeV2rayGateway? gateway,
+  TunnelProbe? probe,
 }) {
   final v2rayGateway = gateway ?? FakeV2rayGateway();
-  final v2rayService = V2rayService(v2rayGateway);
+  // 默认注入「所有目标都可达」的探针：绝大多数用例只关心「连上」的成功路径，
+  // 需要「失败 / 只通部分 / 取消竞态」的用例自己传 probe。
+  final v2rayService = V2rayService(v2rayGateway, probe: probe ?? _allReachable());
   return AppController(
     storage: StorageService(),
     subscriptionService: SubscriptionService(),
@@ -105,7 +125,6 @@ void main() {
     // 节点虽已带延迟，但猎取会重测这一批；脚本给出可用延迟、核心实测通过。
     final gateway = FakeV2rayGateway(
       delayScript: {'vless://a': 10},
-      connectedDelays: [50],
     );
     final controller = _buildController(gateway: gateway);
     await controller.loadInitial();
@@ -124,18 +143,18 @@ void main() {
   test('disconnectNow aborts an in-flight hunt and leaves nothing connected', () async {
     final gateway = FakeV2rayGateway(
       delayScript: {'vless://a': 10},
-      connectedDelays: [50],
     );
-    gateway.pending = Completer<int?>(); // getConnectedDelay() 挂起，模拟连接进行中
-    final controller = _buildController(gateway: gateway);
+    final probe = _allReachable();
+    probe.pending = Completer<bool>(); // 探测挂起，模拟连接进行中
+    final controller = _buildController(gateway: gateway, probe: probe);
     await controller.loadInitial();
     controller.debugSetNodesForTest([_testNode('vless://a', 10)]);
 
     final future = controller.smartConnectNow(verifyWindow: Duration.zero);
     await Future<void>.delayed(Duration.zero);
     await controller.disconnectNow();
-    // 放行挂起的核心实测，让仍在 await 的 connectAndVerify 观察到取消并返回。
-    gateway.pending!.complete(50);
+    // 放行挂起的探测，让仍在 await 的 connectAndVerify 观察到取消并返回。
+    probe.pending!.complete(true);
     await future;
 
     expect(controller.connectedNode, isNull);
@@ -146,7 +165,6 @@ void main() {
   test('smartConnectNow connects without any prior retest (all delays null)', () async {
     final gateway = FakeV2rayGateway(
       delayScript: {'vless://a': 20, 'vless://b': 10},
-      connectedDelays: [50],
     );
     final controller = _buildController(gateway: gateway);
     await controller.loadInitial();
@@ -166,7 +184,6 @@ void main() {
     // 证明超时节点不会被排除，旧数据不可信。
     final gateway = FakeV2rayGateway(
       delayScript: {'vless://t': 30},
-      connectedDelays: [50],
     );
     final controller = _buildController(gateway: gateway);
     await controller.loadInitial();
@@ -184,7 +201,6 @@ void main() {
   test('smartConnectNow persists the delays it discovers while hunting', () async {
     final gateway = FakeV2rayGateway(
       delayScript: {'vless://a': 25},
-      connectedDelays: [50],
     );
     final controller = _buildController(gateway: gateway);
     await controller.loadInitial();
@@ -202,7 +218,6 @@ void main() {
     final gateway = FakeV2rayGateway(
       gate: gate,
       delayScript: {'vless://a': 10},
-      connectedDelays: [50],
     );
     final controller = _buildController(gateway: gateway);
     await controller.loadInitial();
@@ -230,9 +245,12 @@ void main() {
   test('smartConnectNow reports failure when nothing works', () async {
     final gateway = FakeV2rayGateway(
       delayScript: {'vless://a': 10},
-      connectedDelays: const [],   // 核心经该节点始终取不到数据
     );
-    final controller = _buildController(gateway: gateway);
+    // 探针判定该节点什么都到不了。
+    final controller = _buildController(
+      gateway: gateway,
+      probe: _nothingReachable(),
+    );
     await controller.loadInitial();
     controller.debugSetNodesForTest([_rawNode('vless://a')]);
 
@@ -432,7 +450,7 @@ void main() {
   });
 
   test('connectToNode connects the selected node and persists it on success', () async {
-    final gateway = FakeV2rayGateway(connectedDelays: [50]);
+    final gateway = FakeV2rayGateway();
     final controller = _buildController(gateway: gateway);
     await controller.loadInitial();
     final node = _testNode('vless://a', 10);
@@ -447,10 +465,13 @@ void main() {
   });
 
   test('connectToNode marks disconnected when the core proxy yields no data', () async {
-    final gateway = FakeV2rayGateway(connectedDelays: [-1]);
-    // 核心经该节点始终取不到数据 → connectAndVerify 判定「连接不可用」。
+    final gateway = FakeV2rayGateway();
+    // 探针判定该节点什么都到不了 → connectAndVerify 判定「连接不可用」。
     // 传 Duration.zero 的 establishWindow，免得真等满默认的 10s。
-    final controller = _buildController(gateway: gateway);
+    final controller = _buildController(
+      gateway: gateway,
+      probe: _nothingReachable(),
+    );
     await controller.loadInitial();
     final node = _testNode('vless://a', 10);
 
@@ -463,7 +484,7 @@ void main() {
   });
 
   test('connectToNode reports a permission failure when the VPN permission is denied', () async {
-    final gateway = FakeV2rayGateway(permissionGranted: false, connectedDelays: [50]);
+    final gateway = FakeV2rayGateway(permissionGranted: false);
     final controller = _buildController(gateway: gateway);
     await controller.loadInitial();
     final node = _testNode('vless://a', 10);
@@ -479,7 +500,7 @@ void main() {
   });
 
   test('connectToNode can connect an untested node without a prior retest', () async {
-    final gateway = FakeV2rayGateway(connectedDelays: [50]);
+    final gateway = FakeV2rayGateway();
     final controller = _buildController(gateway: gateway);
     await controller.loadInitial();
     final node = _rawNode('vless://untested'); // delayMs == null：从未测速
@@ -493,7 +514,7 @@ void main() {
   });
 
   test('connectToNode is ignored while busy', () async {
-    final gateway = FakeV2rayGateway(connectedDelays: [50]);
+    final gateway = FakeV2rayGateway();
     final controller = _buildController(gateway: gateway);
     await controller.loadInitial();
     final node = _testNode('vless://a', 10);
@@ -513,7 +534,6 @@ void main() {
   test('意外掉线会触发自动重连并最终重新连上', () async {
     final gateway = FakeV2rayGateway(
       delayScript: {'vless://a': 10},
-      connectedDelays: [50],
     );
     final controller = _buildController(gateway: gateway);
     await controller.loadInitial();
@@ -539,7 +559,7 @@ void main() {
   });
 
   test('用户主动断开不会触发自动重连', () async {
-    final gateway = FakeV2rayGateway(connectedDelays: [50]);
+    final gateway = FakeV2rayGateway();
     final controller = _buildController(gateway: gateway);
     await controller.loadInitial();
     await controller.connectToNode(_testNode('vless://a', 10));
@@ -554,7 +574,7 @@ void main() {
   });
 
   test('有操作在跑(busy)时不抢连接状态', () async {
-    final gateway = FakeV2rayGateway(connectedDelays: [50]);
+    final gateway = FakeV2rayGateway();
     final controller = _buildController(gateway: gateway);
     await controller.loadInitial();
     await controller.connectToNode(_testNode('vless://a', 10));
@@ -601,10 +621,9 @@ void main() {
 
   test('自动重连有次数上限，超过后提示手动重试', () async {
     // 猎取必然失败：节点没有脚本延迟 -> 测出 -1 -> 永不被当作候选，
-    // 所以整条猎取链路瞬时结束。刻意不用 connectedDelays: const []
-    // 那条路径，因为重连内部调用的是生产默认参数（8s 实测窗口），
-    // 注入不了极短窗口，会把测试拖慢。
-    final gateway = FakeV2rayGateway(connectedDelays: [50]);
+    // 所以整条猎取链路瞬时结束。刻意不走「探针判不通 + 默认 8s 实测窗口」
+    // 那条路径，因为重连内部调用的是生产默认参数，注入不了极短窗口，会把测试拖慢。
+    final gateway = FakeV2rayGateway();
     final controller = _buildController(gateway: gateway);
     await controller.loadInitial();
     controller.debugSetNodesForTest([_rawNode('vless://a')]);
@@ -624,12 +643,14 @@ void main() {
   test('smartConnectNow 优先挑全通节点：partial 先被记住，后面全通者胜出', () async {
     final gateway = FakeV2rayGateway(
       delayScript: {'vless://p': 10, 'vless://f': 20},
-      // 调用顺序 = 每个候选先 google 后 twitter：
-      //   p: google 50 ✓ / twitter -1 ✗ → partial，先记住
-      //   f: google 50 ✓ / twitter 50 ✓ → verified，胜出
-      connectedDelays: [50, -1, 50, 50],
     );
-    final controller = _buildController(gateway: gateway);
+    // 探针脚本按调用顺序给出结果（每个候选先 google 后 twitter）：
+    //   p: google ✓ / twitter ✗ → partial，先记住
+    //   f: google ✓ / twitter ✓ → verified，胜出
+    final controller = _buildController(
+      gateway: gateway,
+      probe: FakeTunnelProbe(results: [true, false, true, true]),
+    );
     await controller.loadInitial();
     controller.debugSetNodesForTest([
       _testNode('vless://p', 10),
@@ -647,11 +668,9 @@ void main() {
   test('smartConnectNow 没有全通节点时回退连上 partial（Twitter 不可用）', () async {
     final gateway = FakeV2rayGateway(
       delayScript: {'vless://p': 10},
-      // p: google 50 ✓ / twitter -1 ✗ → partial；
-      // 回退再连一次同样是 google 50 ✓ / twitter -1 ✗ → partial，保持连接。
-      connectedDelays: [50, -1, 50, -1],
     );
-    final controller = _buildController(gateway: gateway);
+    // 探针只认 google：p 每次都是 google ✓ / twitter ✗ → partial，保持连接。
+    final controller = _buildController(gateway: gateway, probe: _onlyGoogle());
     await controller.loadInitial();
     controller.debugSetNodesForTest([_testNode('vless://p', 10)]);
 
@@ -666,9 +685,12 @@ void main() {
   test('smartConnectNow 主目标也不通时报告失败，且不回退 partial', () async {
     final gateway = FakeV2rayGateway(
       delayScript: {'vless://p': 10},
-      connectedDelays: const [], // 核心经该节点始终取不到数据（主目标就不过）
     );
-    final controller = _buildController(gateway: gateway);
+    // 探针判定主目标就不过。
+    final controller = _buildController(
+      gateway: gateway,
+      probe: _nothingReachable(),
+    );
     await controller.loadInitial();
     controller.debugSetNodesForTest([_testNode('vless://p', 10)]);
 
