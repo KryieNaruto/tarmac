@@ -8,7 +8,6 @@ import 'services/storage_service.dart';
 import 'services/subscription_service.dart';
 import 'services/v2ray_gateway.dart';
 import 'services/v2ray_service.dart';
-import 'services/connectivity_probe.dart';
 
 void main() {
   runApp(const TarmacApp());
@@ -35,7 +34,7 @@ class _TarmacAppState extends State<TarmacApp> {
       storage: StorageService(),
       subscriptionService: SubscriptionService(),
       v2rayService: _v2rayService,
-      smartConnect: SmartConnectService(_v2rayService, HttpConnectivityProbe()),
+      smartConnect: SmartConnectService(_v2rayService),
     );
     _v2rayService.initialize();
     _controller.bootstrap();

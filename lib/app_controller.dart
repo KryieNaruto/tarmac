@@ -206,18 +206,12 @@ class AppController extends ChangeNotifier {
       case SmartConnectResult.allFailed:
         connectedNode = null;
         connectionState = V2rayConnectionState.disconnected;
-        statusMessage = '全部节点不可用，请刷新订阅重试';
+        statusMessage = '全部节点都取不到数据，请刷新订阅或换节点重试';
         break;
       case SmartConnectResult.noCandidates:
         connectedNode = null;
         connectionState = V2rayConnectionState.disconnected;
         statusMessage = '还没有可用延迟数据，请先测速';
-        break;
-      case SmartConnectResult.egressCheckUnavailable:
-        // 拿不到直连基线：不是节点的问题，别说「全部节点不可用」误导用户去换节点。
-        connectedNode = null;
-        connectionState = V2rayConnectionState.disconnected;
-        statusMessage = '无法校验出口 IP（探测端点不可达），请检查网络';
         break;
       case SmartConnectResult.cancelled:
         connectedNode = null;
@@ -231,7 +225,7 @@ class AppController extends ChangeNotifier {
   /// 连接用户手动选中的节点。允许连**未测速**的节点（用户明确要这个）。
   ///
   /// [establishWindow] 透传给 [SmartConnectService.connectAndVerify]，仅为测试能
-  /// 用极短窗口跑「隧道没通」这类失败路径；生产调用不传，保持默认 10s。
+  /// 用极短窗口跑「取不到数据」这类失败路径；生产调用不传，保持默认 10s。
   Future<void> connectToNode(
     ProxyNode node, {
     Duration establishWindow = const Duration(seconds: 10),
@@ -253,8 +247,8 @@ class AppController extends ChangeNotifier {
         establishWindow: establishWindow,
       );
 
-      // 如实区分失败原因：只有 tunnelNotEstablished 才是「流量没走隧道」，
-      // 把「无法校验」说成隧道问题会把用户引向错误的排查方向。
+      // 如实区分失败原因：只有 proxyUnavailable 才是「经该节点取不到数据」，
+      // 把「权限被拒」说成节点问题会把用户引向错误的排查方向。
       switch (outcome) {
         case ConnectOutcome.verified:
           connectedNode = node;
@@ -262,21 +256,16 @@ class AppController extends ChangeNotifier {
           statusMessage = '已连接 · ${node.remark}';
           await storage.saveLastConnectedNodeId(node.id);
           break;
-        case ConnectOutcome.egressCheckUnavailable:
-          connectedNode = null;
-          connectionState = V2rayConnectionState.disconnected;
-          statusMessage = '无法校验出口 IP（探测端点不可达），未连接';
-          break;
         case ConnectOutcome.permissionDenied:
           connectedNode = null;
           connectionState = V2rayConnectionState.disconnected;
           statusMessage = '连接失败：未授予 VPN 权限';
           break;
-        case ConnectOutcome.tunnelNotEstablished:
+        case ConnectOutcome.proxyUnavailable:
           // connectAndVerify 在此路径内部已自行断开，这里不再重复 disconnect。
           connectedNode = null;
           connectionState = V2rayConnectionState.disconnected;
-          statusMessage = '连接失败：流量未走隧道';
+          statusMessage = '连接不可用：经该节点取不到数据';
           break;
       }
     } finally {

@@ -10,7 +10,6 @@ import 'package:tarmac/services/storage_service.dart';
 import 'package:tarmac/services/subscription_service.dart';
 import 'package:tarmac/services/v2ray_gateway.dart';
 import 'package:tarmac/services/v2ray_service.dart';
-import 'fakes/fake_connectivity_probe.dart';
 import 'fakes/fake_v2ray_gateway.dart';
 
 ProxyNode _testNode(String link, int delayMs) => ProxyNode(
@@ -34,7 +33,6 @@ ProxyNode _rawNode(String link) => ProxyNode(
 AppController _buildController({
   http.Client? httpClient,
   FakeV2rayGateway? gateway,
-  FakeConnectivityProbe? probe,
 }) {
   final v2rayGateway = gateway ?? FakeV2rayGateway();
   final v2rayService = V2rayService(v2rayGateway);
@@ -42,7 +40,7 @@ AppController _buildController({
     storage: StorageService(),
     subscriptionService: SubscriptionService(),
     v2rayService: v2rayService,
-    smartConnect: SmartConnectService(v2rayService, probe ?? FakeConnectivityProbe()),
+    smartConnect: SmartConnectService(v2rayService),
     httpClient: httpClient ?? MockClient((_) async => http.Response('', 404)),
   );
 }
@@ -100,9 +98,8 @@ void main() {
   });
 
   test('smartConnectNow success updates connectedNode and status message', () async {
-    final gateway = FakeV2rayGateway();
-    final probe = FakeConnectivityProbe(ips: ['1.1.1.1', '2.2.2.2']);
-    final controller = _buildController(gateway: gateway, probe: probe);
+    final gateway = FakeV2rayGateway(connectedDelays: [50]);
+    final controller = _buildController(gateway: gateway);
     await controller.loadInitial();
     controller.debugSetNodesForTest([
       _testNode('vless://a', 10),
@@ -116,18 +113,17 @@ void main() {
 
   test('disconnectNow cancels an in-flight smart connect and resets status', () async {
     final gateway = FakeV2rayGateway();
-    final probe = FakeConnectivityProbe();
-    probe.pending = Completer<String?>(); // first egressIp() hangs until completed below
-    final controller = _buildController(gateway: gateway, probe: probe);
+    gateway.pending = Completer<int?>(); // first getConnectedDelay() hangs until completed below
+    final controller = _buildController(gateway: gateway);
     await controller.loadInitial();
     controller.debugSetNodesForTest([_testNode('vless://a', 10)]);
 
     final future = controller.smartConnectNow();
     await Future<void>.delayed(Duration.zero);
     await controller.disconnectNow();
-    // Let the still-pending probe resolve so smartConnectNow's awaited
+    // Let the still-pending core call resolve so smartConnectNow's awaited
     // connectBest() can observe the cancellation and return.
-    probe.pending!.complete('9.9.9.9');
+    gateway.pending!.complete(50);
     await future;
 
     expect(controller.connectedNode, isNull);
@@ -323,9 +319,8 @@ void main() {
   });
 
   test('connectToNode connects the selected node and persists it on success', () async {
-    final gateway = FakeV2rayGateway();
-    final probe = FakeConnectivityProbe(ips: ['1.1.1.1', '2.2.2.2']);
-    final controller = _buildController(gateway: gateway, probe: probe);
+    final gateway = FakeV2rayGateway(connectedDelays: [50]);
+    final controller = _buildController(gateway: gateway);
     await controller.loadInitial();
     final node = _testNode('vless://a', 10);
 
@@ -338,12 +333,11 @@ void main() {
     expect(await StorageService().loadLastConnectedNodeId(), 'vless://a');
   });
 
-  test('connectToNode marks disconnected when the egress IP never changes', () async {
-    final gateway = FakeV2rayGateway();
-    // 出口 IP 永远不变 → connectAndVerify 判定「流量未走隧道」。
+  test('connectToNode marks disconnected when the core proxy yields no data', () async {
+    final gateway = FakeV2rayGateway(connectedDelays: [-1]);
+    // 核心经该节点始终取不到数据 → connectAndVerify 判定「连接不可用」。
     // 传 Duration.zero 的 establishWindow，免得真等满默认的 10s。
-    final probe = FakeConnectivityProbe(ips: ['1.1.1.1']);
-    final controller = _buildController(gateway: gateway, probe: probe);
+    final controller = _buildController(gateway: gateway);
     await controller.loadInitial();
     final node = _testNode('vless://a', 10);
 
@@ -351,35 +345,13 @@ void main() {
 
     expect(controller.connectedNode, isNull);
     expect(controller.connectionState, V2rayConnectionState.disconnected);
-    expect(controller.statusMessage, contains('未走隧道'));
-    expect(controller.busy, isFalse);
-  });
-
-  test('connectToNode reports egress-check-unavailable (not a tunnel failure) when the baseline IP is null',
-      () async {
-    final gateway = FakeV2rayGateway();
-    // 探测端点不可达 → 拿不到直连基线，压根没发起连接。
-    // 文案必须说「无法校验」，绝不能误报「未走隧道」把用户引去换节点。
-    final probe = FakeConnectivityProbe(ips: [null]);
-    final controller = _buildController(gateway: gateway, probe: probe);
-    await controller.loadInitial();
-    final node = _testNode('vless://a', 10);
-
-    await controller.connectToNode(node, establishWindow: Duration.zero);
-
-    expect(controller.connectedNode, isNull);
-    expect(controller.connectionState, V2rayConnectionState.disconnected);
-    expect(controller.statusMessage, contains('无法校验'));
-    expect(controller.statusMessage, isNot(contains('未走隧道')));
-    // 从未发起连接。
-    expect(gateway.lastStartedRawLink, isNull);
+    expect(controller.statusMessage, contains('经该节点取不到数据'));
     expect(controller.busy, isFalse);
   });
 
   test('connectToNode reports a permission failure when the VPN permission is denied', () async {
-    final gateway = FakeV2rayGateway(permissionGranted: false);
-    final probe = FakeConnectivityProbe(ips: ['1.1.1.1', '2.2.2.2']);
-    final controller = _buildController(gateway: gateway, probe: probe);
+    final gateway = FakeV2rayGateway(permissionGranted: false, connectedDelays: [50]);
+    final controller = _buildController(gateway: gateway);
     await controller.loadInitial();
     final node = _testNode('vless://a', 10);
 
@@ -394,9 +366,8 @@ void main() {
   });
 
   test('connectToNode can connect an untested node without a prior retest', () async {
-    final gateway = FakeV2rayGateway();
-    final probe = FakeConnectivityProbe(ips: ['1.1.1.1', '2.2.2.2']);
-    final controller = _buildController(gateway: gateway, probe: probe);
+    final gateway = FakeV2rayGateway(connectedDelays: [50]);
+    final controller = _buildController(gateway: gateway);
     await controller.loadInitial();
     final node = _rawNode('vless://untested'); // delayMs == null：从未测速
     expect(node.delayMs, isNull);
@@ -409,9 +380,8 @@ void main() {
   });
 
   test('connectToNode is ignored while busy', () async {
-    final gateway = FakeV2rayGateway();
-    final probe = FakeConnectivityProbe(ips: ['1.1.1.1', '2.2.2.2']);
-    final controller = _buildController(gateway: gateway, probe: probe);
+    final gateway = FakeV2rayGateway(connectedDelays: [50]);
+    final controller = _buildController(gateway: gateway);
     await controller.loadInitial();
     final node = _testNode('vless://a', 10);
 

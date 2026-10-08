@@ -11,7 +11,6 @@ import 'package:tarmac/services/smart_connect_service.dart';
 import 'package:tarmac/services/storage_service.dart';
 import 'package:tarmac/services/subscription_service.dart';
 import 'package:tarmac/services/v2ray_service.dart';
-import '../fakes/fake_connectivity_probe.dart';
 import '../fakes/fake_v2ray_gateway.dart';
 
 void main() {
@@ -25,7 +24,7 @@ void main() {
       storage: StorageService(),
       subscriptionService: SubscriptionService(),
       v2rayService: v2rayService,
-      smartConnect: SmartConnectService(v2rayService, FakeConnectivityProbe()),
+      smartConnect: SmartConnectService(v2rayService),
       httpClient: MockClient((_) async => http.Response('', 404)),
     );
     await controller.loadInitial();
@@ -50,7 +49,7 @@ void main() {
       storage: StorageService(),
       subscriptionService: SubscriptionService(),
       v2rayService: v2rayService,
-      smartConnect: SmartConnectService(v2rayService, FakeConnectivityProbe()),
+      smartConnect: SmartConnectService(v2rayService),
       httpClient: MockClient(
         (_) async => http.Response('vless://shared@x:443#Shared', 200),
       ),
@@ -75,7 +74,7 @@ void main() {
       storage: StorageService(),
       subscriptionService: SubscriptionService(),
       v2rayService: v2rayService,
-      smartConnect: SmartConnectService(v2rayService, FakeConnectivityProbe()),
+      smartConnect: SmartConnectService(v2rayService),
       httpClient: MockClient((_) async => http.Response('', 404)),
     );
     await controller.loadInitial();
@@ -92,7 +91,7 @@ void main() {
       storage: StorageService(),
       subscriptionService: SubscriptionService(),
       v2rayService: v2rayService,
-      smartConnect: SmartConnectService(v2rayService, FakeConnectivityProbe()),
+      smartConnect: SmartConnectService(v2rayService),
       httpClient: MockClient((_) async => http.Response('', 404)),
     );
     await controller.loadInitial();
@@ -109,7 +108,7 @@ void main() {
       storage: StorageService(),
       subscriptionService: SubscriptionService(),
       v2rayService: v2rayService,
-      smartConnect: SmartConnectService(v2rayService, FakeConnectivityProbe()),
+      smartConnect: SmartConnectService(v2rayService),
       httpClient: MockClient((_) async => http.Response('', 404)),
     );
     await controller.loadInitial();
@@ -129,7 +128,7 @@ void main() {
       storage: StorageService(),
       subscriptionService: SubscriptionService(),
       v2rayService: v2rayService,
-      smartConnect: SmartConnectService(v2rayService, FakeConnectivityProbe()),
+      smartConnect: SmartConnectService(v2rayService),
       httpClient: MockClient((_) async => http.Response('', 404)),
     );
     await controller.loadInitial();
@@ -142,16 +141,13 @@ void main() {
   });
 
   testWidgets('tapping a node row connects to that node', (tester) async {
-    final v2rayService = V2rayService(FakeV2rayGateway());
+    // 核心经该节点实测返回 50ms → 手动连接被判定为「已连接」。
+    final v2rayService = V2rayService(FakeV2rayGateway(connectedDelays: [50]));
     final controller = AppController(
       storage: StorageService(),
       subscriptionService: SubscriptionService(),
       v2rayService: v2rayService,
-      // 出口 IP 会变 → 手动连接被判定为「真连通」。
-      smartConnect: SmartConnectService(
-        v2rayService,
-        FakeConnectivityProbe(ips: ['1.1.1.1', '2.2.2.2']),
-      ),
+      smartConnect: SmartConnectService(v2rayService),
       httpClient: MockClient((_) async => http.Response('', 404)),
     );
     await controller.loadInitial();
@@ -193,7 +189,7 @@ void main() {
       storage: StorageService(),
       subscriptionService: SubscriptionService(),
       v2rayService: v2rayService,
-      smartConnect: SmartConnectService(v2rayService, FakeConnectivityProbe()),
+      smartConnect: SmartConnectService(v2rayService),
       httpClient: MockClient((_) async => http.Response('', 404)),
     );
     await controller.loadInitial();

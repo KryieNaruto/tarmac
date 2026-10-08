@@ -36,6 +36,15 @@ class V2rayService {
     return [...results, ...nodes.sublist(results.length)];
   }
 
+  /// 连上之后让核心经该节点实测一次请求的默认目标。
+  /// 用被墙的域名：能取到就说明流量**真的穿过了该节点**（与所在网络是否封它无关，
+  /// 因为这是核心经代理发出的请求，不是本机直连）。
+  static const kVerifyUrl = 'https://www.google.com/generate_204';
+
+  /// 连上后经核心实测一次；成功返回毫秒数，取不到数据返回 null。
+  Future<int?> verifyConnected({String url = kVerifyUrl}) =>
+      _gateway.getConnectedDelay(url);
+
   Future<bool> connect(ProxyNode node) async {
     final granted = await _gateway.requestPermission();
     if (!granted) return false;

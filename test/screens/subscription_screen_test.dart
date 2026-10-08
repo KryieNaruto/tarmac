@@ -10,7 +10,6 @@ import 'package:tarmac/services/smart_connect_service.dart';
 import 'package:tarmac/services/storage_service.dart';
 import 'package:tarmac/services/subscription_service.dart';
 import 'package:tarmac/services/v2ray_service.dart';
-import '../fakes/fake_connectivity_probe.dart';
 import '../fakes/fake_v2ray_gateway.dart';
 
 void main() {
@@ -24,7 +23,7 @@ void main() {
       storage: StorageService(),
       subscriptionService: SubscriptionService(),
       v2rayService: v2rayService,
-      smartConnect: SmartConnectService(v2rayService, FakeConnectivityProbe()),
+      smartConnect: SmartConnectService(v2rayService),
       httpClient: MockClient((_) async => http.Response('', 404)),
     );
     await controller.loadInitial();
@@ -43,7 +42,7 @@ void main() {
       storage: StorageService(),
       subscriptionService: SubscriptionService(),
       v2rayService: v2rayService,
-      smartConnect: SmartConnectService(v2rayService, FakeConnectivityProbe()),
+      smartConnect: SmartConnectService(v2rayService),
       httpClient: MockClient((_) async => http.Response('', 404)),
     );
     controller.subscriptions = [
@@ -67,7 +66,7 @@ void main() {
       storage: StorageService(),
       subscriptionService: SubscriptionService(),
       v2rayService: v2rayService,
-      smartConnect: SmartConnectService(v2rayService, FakeConnectivityProbe()),
+      smartConnect: SmartConnectService(v2rayService),
       httpClient: MockClient((_) async => http.Response('', 404)),
     );
     controller.subscriptions = [
@@ -90,7 +89,7 @@ void main() {
       storage: StorageService(),
       subscriptionService: SubscriptionService(),
       v2rayService: v2rayService,
-      smartConnect: SmartConnectService(v2rayService, FakeConnectivityProbe()),
+      smartConnect: SmartConnectService(v2rayService),
       httpClient: MockClient((_) async => http.Response('', 404)),
     );
     controller.subscriptions = [
