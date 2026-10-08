@@ -30,6 +30,9 @@ class AppController extends ChangeNotifier {
   final SmartConnectService smartConnect;
   final http.Client? _httpClient;
 
+  /// 供订阅页「加源前试拉」复用同一个 HTTP 客户端（测试里注入 mock）。
+  http.Client? get httpClient => _httpClient;
+
   /// 插件状态流订阅句柄，[dispose] 时取消。
   late final StreamSubscription<V2rayConnectionState> _stateSubscription;
 
@@ -506,6 +509,16 @@ class AppController extends ChangeNotifier {
 
   Future<void> removeSubscription(String id) async {
     subscriptions = subscriptions.where((s) => s.id != id).toList();
+    await storage.saveSubscriptions(subscriptions);
+    notifyListeners();
+  }
+
+  /// 重命名订阅源（spec §8「可编辑名字」）。
+  /// [ProxySubscription.name] 是可变字段，直接改即可。
+  Future<void> renameSubscription(String id, String name) async {
+    subscriptions = subscriptions
+        .map((s) => s.id == id ? (s..name = name) : s)
+        .toList();
     await storage.saveSubscriptions(subscriptions);
     notifyListeners();
   }

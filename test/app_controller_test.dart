@@ -571,6 +571,34 @@ void main() {
     controller.busy = false;
   });
 
+  test('renameSubscription renames a subscription and persists it', () async {
+    final controller = _buildController();
+    await controller.loadInitial();
+    expect(controller.subscriptions, isNotEmpty);
+    final id = controller.subscriptions.first.id;
+    final count = controller.subscriptions.length;
+
+    await controller.renameSubscription(id, '我的机场');
+
+    expect(controller.subscriptions.first.name, '我的机场');
+    expect(controller.subscriptions, hasLength(count));
+
+    // 新建 controller 模拟重启，能从存储读回新名字。
+    final reloaded = _buildController();
+    await reloaded.loadInitial();
+    expect(reloaded.subscriptions.first.name, '我的机场');
+  });
+
+  test('renameSubscription with an unknown id is a no-op and does not throw', () async {
+    final controller = _buildController();
+    await controller.loadInitial();
+    final before = controller.subscriptions.map((s) => s.name).toList();
+
+    await controller.renameSubscription('no-such-id', 'X');
+
+    expect(controller.subscriptions.map((s) => s.name).toList(), before);
+  });
+
   test('自动重连有次数上限，超过后提示手动重试', () async {
     // 猎取必然失败：节点没有脚本延迟 -> 测出 -1 -> 永不被当作候选，
     // 所以整条猎取链路瞬时结束。刻意不用 connectedDelays: const []
