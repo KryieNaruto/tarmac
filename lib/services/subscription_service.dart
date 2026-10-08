@@ -119,6 +119,28 @@ List<ProxyNode> dedupeNodes(List<ProxyNode> nodes) {
   return result;
 }
 
+/// 把缓存的延迟按 rawLink 合回刚拉取的节点。
+/// 命中的节点带上 delayMs 与 testedAt；未命中的保持原样（delayMs 仍为 null）。
+/// 纯函数，不改入参。
+List<ProxyNode> applyCachedDelays(
+  List<ProxyNode> nodes,
+  Map<String, int> cachedDelays, {
+  DateTime? testedAt,
+}) {
+  // 空缓存直接返回原列表，避免无谓拷贝。
+  if (cachedDelays.isEmpty) return nodes;
+  return [
+    for (final node in nodes)
+      if (cachedDelays.containsKey(node.rawLink))
+        node.copyWith(
+          delayMs: cachedDelays[node.rawLink],
+          lastTestedAt: testedAt,
+        )
+      else
+        node,
+  ];
+}
+
 /// 按延迟排序：可用节点（delayMs 非 null 且 >= 0）按延迟升序排在前面；
 /// 未测速（null）与超时（< 0）保持它们原本的相对顺序、整体沉底。
 ///

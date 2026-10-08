@@ -18,6 +18,9 @@ class NodeListScreen extends StatelessWidget {
           body: Column(
             children: [
               ConnectionBar(controller: controller),
+              // 上次测速时间：有记录且当前不在测速中才显示（测速中看进度行即可）。
+              if (controller.lastRetestAt != null && !controller.retesting)
+                _LastRetestRow(controller: controller),
               // 测速进度行：仅在批量测速进行中插入。
               if (controller.retesting) _RetestProgressRow(controller: controller),
               Expanded(
@@ -29,9 +32,16 @@ class NodeListScreen extends StatelessWidget {
                           itemCount: controller.nodes.length,
                           itemBuilder: (context, index) {
                             final node = controller.nodes[index];
+                            final isConnected = controller.connectedNode?.id == node.id;
                             // 测速过程中 nodes 会按延迟实时重排，靠 key 让 Flutter
                             // 按节点身份复用 element，避免内容串行/闪跳。
-                            return NodeTile(key: ValueKey(node.id), node: node);
+                            return NodeTile(
+                              key: ValueKey(node.id),
+                              node: node,
+                              isConnected: isConnected,
+                              // 已连接的那行点了不做事（"断开"仍由顶部按钮负责，避免误触断开）。
+                              onTap: isConnected ? null : () => controller.connectToNode(node),
+                            );
                           },
                         ),
                 ),
@@ -110,4 +120,32 @@ class _RetestProgressRow extends StatelessWidget {
       ),
     );
   }
+}
+
+/// 「上次测速 M/d HH:mm」小号灰字行。仅在历史存在且当前不在测速中时插入。
+class _LastRetestRow extends StatelessWidget {
+  const _LastRetestRow({required this.controller});
+  final AppController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: Text(
+          '上次测速 ${_formatTime(controller.lastRetestAt!)}',
+          style: const TextStyle(fontSize: 12, color: Colors.grey),
+        ),
+      ),
+    );
+  }
+}
+
+/// 手写时间格式化：M/d HH:mm（月日不补零、时分补零两位），例如 10/8 09:05。
+/// 刻意不复用 subscription_screen.dart 里的同款函数——那个是 private，跨文件用不了。
+String _formatTime(DateTime time) {
+  final hour = time.hour.toString().padLeft(2, '0');
+  final minute = time.minute.toString().padLeft(2, '0');
+  return '${time.month}/${time.day} $hour:$minute';
 }

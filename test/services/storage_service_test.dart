@@ -65,4 +65,49 @@ void main() {
     await storage.saveLastConnectedNodeId(null);
     expect(await storage.loadLastConnectedNodeId(), isNull);
   });
+
+  test('node delays round-trip together with the last retest time', () async {
+    final storage = StorageService();
+    final testedAt = DateTime.parse('2026-10-07T12:34:56');
+
+    await storage.saveNodeDelays({'vless://a@x:443#A': 42}, testedAt);
+
+    expect(await storage.loadNodeDelays(), {'vless://a@x:443#A': 42});
+    expect(await storage.loadLastRetestAt(), testedAt);
+  });
+
+  test('node delays default to empty map and null retest time when unset', () async {
+    final storage = StorageService();
+    expect(await storage.loadNodeDelays(), isEmpty);
+    expect(await storage.loadLastRetestAt(), isNull);
+  });
+
+  test('node delays loaders tolerate corrupt data without throwing', () async {
+    SharedPreferences.setMockInitialValues({
+      'tarmac.node_delays': 'not json at all',
+      'tarmac.last_retest_at': 'not a date',
+    });
+    final storage = StorageService();
+
+    expect(await storage.loadNodeDelays(), isEmpty);
+    expect(await storage.loadLastRetestAt(), isNull);
+  });
+
+  test('node delays loader handles non-map JSON without throwing', () async {
+    SharedPreferences.setMockInitialValues({
+      'tarmac.node_delays': '[1, 2, 3]',
+    });
+    final storage = StorageService();
+
+    expect(await storage.loadNodeDelays(), isEmpty);
+  });
+
+  test('node delays loader converts JSON numbers and skips null/non-numeric values', () async {
+    SharedPreferences.setMockInitialValues({
+      'tarmac.node_delays': '{"a": 42.0, "b": null, "c": "x", "d": 7}',
+    });
+    final storage = StorageService();
+
+    expect(await storage.loadNodeDelays(), {'a': 42, 'd': 7});
+  });
 }

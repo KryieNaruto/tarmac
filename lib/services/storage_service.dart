@@ -7,6 +7,8 @@ import '../models/subscription.dart';
 const _kSubscriptionsKey = 'tarmac.subscriptions';
 const _kManualNodesKey = 'tarmac.manual_nodes';
 const _kLastConnectedKey = 'tarmac.last_connected_node_id';
+const _kNodeDelaysKey = 'tarmac.node_delays';       // JSON: {rawLink: delayMs}
+const _kLastRetestAtKey = 'tarmac.last_retest_at';  // ISO8601 字符串
 
 List<ProxySubscription> defaultSubscriptions() => [
       ProxySubscription(
@@ -78,5 +80,47 @@ class StorageService {
     } else {
       await prefs.setString(_kLastConnectedKey, id);
     }
+  }
+
+  /// 已缓存的节点延迟，按 rawLink 索引。没有缓存或解析失败时返回空 map。
+  ///
+  /// 与 [loadSubscriptions] 不同，这里刻意容错：坏数据只丢弃、不抛。
+  Future<Map<String, int>> loadNodeDelays() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_kNodeDelaysKey);
+    if (raw == null) return {};
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return {};
+      final result = <String, int>{};
+      decoded.forEach((key, value) {
+        // JSON 里的 42 可能被解成 42.0，用 num 宽容转换；null / 字符串直接跳过。
+        if (key is String && value is num) {
+          result[key] = value.toInt();
+        }
+      });
+      return result;
+    } catch (_) {
+      return {};
+    }
+  }
+
+  /// 保存延迟缓存与本次测速时间。**只写传进来的这些节点**（调用方负责裁剪）。
+  /// 空 map 也照常写（是否该写由调用方决定）。
+  Future<void> saveNodeDelays(
+    Map<String, int> byRawLink,
+    DateTime testedAt,
+  ) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_kNodeDelaysKey, jsonEncode(byRawLink));
+    await prefs.setString(_kLastRetestAtKey, testedAt.toIso8601String());
+  }
+
+  /// 上次测速时间；从未测过或解析失败返回 null。
+  Future<DateTime?> loadLastRetestAt() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_kLastRetestAtKey);
+    if (raw == null) return null;
+    return DateTime.tryParse(raw);
   }
 }

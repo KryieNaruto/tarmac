@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:tarmac/app_controller.dart';
+import 'package:tarmac/models/proxy_node.dart';
 import 'package:tarmac/screens/node_list_screen.dart';
 import 'package:tarmac/services/smart_connect_service.dart';
 import 'package:tarmac/services/storage_service.dart';
@@ -138,5 +139,68 @@ void main() {
 
     final fab = tester.widget<FloatingActionButton>(find.byType(FloatingActionButton));
     expect(fab.onPressed, isNull);
+  });
+
+  testWidgets('tapping a node row connects to that node', (tester) async {
+    final v2rayService = V2rayService(FakeV2rayGateway());
+    final controller = AppController(
+      storage: StorageService(),
+      subscriptionService: SubscriptionService(),
+      v2rayService: v2rayService,
+      // 出口 IP 会变 → 手动连接被判定为「真连通」。
+      smartConnect: SmartConnectService(
+        v2rayService,
+        FakeConnectivityProbe(ips: ['1.1.1.1', '2.2.2.2']),
+      ),
+      httpClient: MockClient((_) async => http.Response('', 404)),
+    );
+    await controller.loadInitial();
+    controller.debugSetNodesForTest([
+      ProxyNode(
+        id: 'a',
+        remark: '节点A',
+        protocol: 'vless',
+        rawLink: 'a',
+        sourceSubId: 'manual',
+        delayMs: 50,
+      ),
+      ProxyNode(
+        id: 'b',
+        remark: '节点B',
+        protocol: 'vless',
+        rawLink: 'b',
+        sourceSubId: 'manual',
+        delayMs: 60,
+      ),
+    ]);
+
+    await tester.pumpWidget(MaterialApp(home: NodeListScreen(controller: controller)));
+    expect(find.text('节点A'), findsOneWidget);
+
+    await tester.tap(find.text('节点A'));
+    // 连接过程全是微任务；多 pump 几次把异步链推完（成功路径无定时器）。
+    for (var i = 0; i < 10; i++) {
+      await tester.pump(const Duration(milliseconds: 50));
+    }
+
+    expect(controller.connectedNode?.id, 'a');
+    expect(controller.statusMessage, contains('已连接'));
+  });
+
+  testWidgets('shows the last retest time when available and not retesting', (tester) async {
+    final v2rayService = V2rayService(FakeV2rayGateway());
+    final controller = AppController(
+      storage: StorageService(),
+      subscriptionService: SubscriptionService(),
+      v2rayService: v2rayService,
+      smartConnect: SmartConnectService(v2rayService, FakeConnectivityProbe()),
+      httpClient: MockClient((_) async => http.Response('', 404)),
+    );
+    await controller.loadInitial();
+    controller.lastRetestAt = DateTime(2026, 10, 8, 9, 5);
+
+    await tester.pumpWidget(MaterialApp(home: NodeListScreen(controller: controller)));
+
+    expect(find.text('上次测速 10/8 09:05'), findsOneWidget);
   });
 }

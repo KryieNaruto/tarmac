@@ -34,6 +34,12 @@ class AppController extends ChangeNotifier {
   int retestTotal = 0;
   bool _retestCancelled = false;
 
+  /// 已测出的延迟，按 rawLink 索引；落盘后跨启动复用。
+  Map<String, int> _delayCache = {};
+
+  /// 上次测速时间（UI 用它显示「上次测速 M/d HH:mm」）。
+  DateTime? lastRetestAt;
+
   /// 正在批量测速中（用于 UI 显示进度条）。
   bool get retesting => retestTotal > 0;
 
@@ -52,7 +58,10 @@ class AppController extends ChangeNotifier {
   Future<void> loadInitial() async {
     subscriptions = await storage.loadSubscriptions();
     final manual = await storage.loadManualNodes();
-    nodes = manual;
+    _delayCache = await storage.loadNodeDelays();
+    lastRetestAt = await storage.loadLastRetestAt();
+    // 手工节点也享受同样的延迟合并，保持与订阅节点一致。
+    nodes = applyCachedDelays(manual, _delayCache, testedAt: lastRetestAt);
     notifyListeners();
   }
 
@@ -95,7 +104,13 @@ class AppController extends ChangeNotifier {
     }
 
     subscriptions = updatedSubs;
-    nodes = dedupeNodes([...fetched, ...manualOnly]);
+    // 合并而不是替换：新拉到的节点按 rawLink 把已测延迟带回来，
+    // 否则每次启动/刷新都会把上一轮测出的延迟丢光。
+    nodes = sortByDelay(applyCachedDelays(
+      dedupeNodes([...fetched, ...manualOnly]),
+      _delayCache,
+      testedAt: lastRetestAt,
+    ));
     await storage.saveSubscriptions(subscriptions);
 
     if (retest) {
@@ -146,6 +161,16 @@ class AppController extends ChangeNotifier {
         ? '测速已停止（已完成 $retestDone/$retestTotal）'
         : '测速完成 · $usable/${nodes.length} 个可用';
 
+    // 落盘：被取消时也要写——已测到的部分正是「可中断」要留住的东西。
+    // 只收 delayMs 非 null 的节点（未测的宁可下次重测，也不许当成测过）。
+    // 该 map 只含当前仍在 nodes 里的节点，天然完成裁剪。
+    _delayCache = {
+      for (final n in nodes)
+        if (n.delayMs != null) n.rawLink: n.delayMs!,
+    };
+    lastRetestAt = DateTime.now();
+    await storage.saveNodeDelays(_delayCache, lastRetestAt!);
+
     retestTotal = 0;
     retestDone = 0;
     busy = false;
@@ -188,6 +213,12 @@ class AppController extends ChangeNotifier {
         connectionState = V2rayConnectionState.disconnected;
         statusMessage = '还没有可用延迟数据，请先测速';
         break;
+      case SmartConnectResult.egressCheckUnavailable:
+        // 拿不到直连基线：不是节点的问题，别说「全部节点不可用」误导用户去换节点。
+        connectedNode = null;
+        connectionState = V2rayConnectionState.disconnected;
+        statusMessage = '无法校验出口 IP（探测端点不可达），请检查网络';
+        break;
       case SmartConnectResult.cancelled:
         connectedNode = null;
         connectionState = V2rayConnectionState.disconnected;
@@ -195,6 +226,64 @@ class AppController extends ChangeNotifier {
         break;
     }
     notifyListeners();
+  }
+
+  /// 连接用户手动选中的节点。允许连**未测速**的节点（用户明确要这个）。
+  ///
+  /// [establishWindow] 透传给 [SmartConnectService.connectAndVerify]，仅为测试能
+  /// 用极短窗口跑「隧道没通」这类失败路径；生产调用不传，保持默认 10s。
+  Future<void> connectToNode(
+    ProxyNode node, {
+    Duration establishWindow = const Duration(seconds: 10),
+  }) async {
+    // 忙碌时忽略点击，避免与进行中的拉取/测速/级联打架。
+    if (busy) return;
+
+    try {
+      // 先把可能还在跑的级联取消，并把旧隧道收干净，避免叠隧道。
+      smartConnect.cancel();
+      await v2rayService.disconnect();
+
+      busy = true;
+      statusMessage = '正在连接 · ${node.remark}';
+      notifyListeners();
+
+      final outcome = await smartConnect.connectAndVerify(
+        node,
+        establishWindow: establishWindow,
+      );
+
+      // 如实区分失败原因：只有 tunnelNotEstablished 才是「流量没走隧道」，
+      // 把「无法校验」说成隧道问题会把用户引向错误的排查方向。
+      switch (outcome) {
+        case ConnectOutcome.verified:
+          connectedNode = node;
+          connectionState = V2rayConnectionState.connected;
+          statusMessage = '已连接 · ${node.remark}';
+          await storage.saveLastConnectedNodeId(node.id);
+          break;
+        case ConnectOutcome.egressCheckUnavailable:
+          connectedNode = null;
+          connectionState = V2rayConnectionState.disconnected;
+          statusMessage = '无法校验出口 IP（探测端点不可达），未连接';
+          break;
+        case ConnectOutcome.permissionDenied:
+          connectedNode = null;
+          connectionState = V2rayConnectionState.disconnected;
+          statusMessage = '连接失败：未授予 VPN 权限';
+          break;
+        case ConnectOutcome.tunnelNotEstablished:
+          // connectAndVerify 在此路径内部已自行断开，这里不再重复 disconnect。
+          connectedNode = null;
+          connectionState = V2rayConnectionState.disconnected;
+          statusMessage = '连接失败：流量未走隧道';
+          break;
+      }
+    } finally {
+      // 无论成功、失败还是抛异常，都必须复位 busy，否则界面永久卡在忙碌态。
+      busy = false;
+      notifyListeners();
+    }
   }
 
   Future<void> disconnectNow() async {

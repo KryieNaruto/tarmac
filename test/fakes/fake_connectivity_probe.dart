@@ -1,20 +1,24 @@
 import 'dart:async';
 import 'package:tarmac/services/connectivity_probe.dart';
 
-/// Controllable test double. Each call to `check()` consumes the next
-/// entry in `results` (defaults to `false` once exhausted). If
-/// `pending` is non-null, `check()` waits on that completer instead of
-/// resolving immediately, so tests can exercise cancellation races.
+/// Controllable test double for [ConnectivityProbe]. It reports the device's
+/// current public egress IP.
+///
+/// - `ips` is consumed in order. Once only **one** entry is left, that entry is
+///   returned repeatedly, so tests stay deterministic:
+///   `['1.1.1.1']` means the egress IP never changes.
+/// - If `pending` is non-null, `egressIp()` waits on that completer instead of
+///   resolving immediately, so tests can exercise cancellation races.
 class FakeConnectivityProbe implements ConnectivityProbe {
-  FakeConnectivityProbe({List<bool> results = const []}) : _results = List.of(results);
+  FakeConnectivityProbe({List<String?> ips = const []}) : _ips = List.of(ips);
 
-  final List<bool> _results;
-  Completer<bool>? pending;
+  final List<String?> _ips;
+  Completer<String?>? pending;
 
   @override
-  Future<bool> check({Duration timeout = const Duration(seconds: 5)}) {
+  Future<String?> egressIp({Duration timeout = const Duration(seconds: 5)}) {
     if (pending != null) return pending!.future;
-    if (_results.isEmpty) return Future.value(false);
-    return Future.value(_results.removeAt(0));
+    if (_ips.isEmpty) return Future.value(null);
+    return Future.value(_ips.length == 1 ? _ips.first : _ips.removeAt(0));
   }
 }
