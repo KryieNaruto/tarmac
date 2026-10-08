@@ -88,46 +88,159 @@ void main() {
     expect(controller.nodes, isNotEmpty);
   });
 
-  test('smartConnectNow with no tested nodes yields a friendly noCandidates status', () async {
+  test('smartConnectNow with no nodes reports that no usable node was found', () async {
     final controller = _buildController();
     await controller.loadInitial();
+    expect(controller.nodes, isEmpty);
 
     await controller.smartConnectNow();
 
-    expect(controller.statusMessage, contains('先测速'));
+    // 语义已变：不再要求用户「先测速」，而是直接报告当下没找到可用节点。
+    expect(controller.statusMessage, contains('找不到可用节点'));
+    expect(controller.connectedNode, isNull);
+    expect(controller.busy, isFalse);
   });
 
-  test('smartConnectNow success updates connectedNode and status message', () async {
-    final gateway = FakeV2rayGateway(connectedDelays: [50]);
+  test('smartConnectNow hunts, connects, and updates connectedNode + status', () async {
+    // 节点虽已带延迟，但猎取会重测这一批；脚本给出可用延迟、核心实测通过。
+    final gateway = FakeV2rayGateway(
+      delayScript: {'vless://a': 10},
+      connectedDelays: [50],
+    );
     final controller = _buildController(gateway: gateway);
     await controller.loadInitial();
     controller.debugSetNodesForTest([
       _testNode('vless://a', 10),
     ]);
 
-    await controller.smartConnectNow();
+    await controller.smartConnectNow(verifyWindow: Duration.zero);
 
     expect(controller.connectedNode?.id, 'vless://a');
     expect(controller.statusMessage, contains('已连接'));
+    expect(controller.busy, isFalse);
+    expect(controller.hunting, isFalse);
   });
 
-  test('disconnectNow cancels an in-flight smart connect and resets status', () async {
-    final gateway = FakeV2rayGateway();
-    gateway.pending = Completer<int?>(); // first getConnectedDelay() hangs until completed below
+  test('disconnectNow aborts an in-flight hunt and leaves nothing connected', () async {
+    final gateway = FakeV2rayGateway(
+      delayScript: {'vless://a': 10},
+      connectedDelays: [50],
+    );
+    gateway.pending = Completer<int?>(); // getConnectedDelay() 挂起，模拟连接进行中
     final controller = _buildController(gateway: gateway);
     await controller.loadInitial();
     controller.debugSetNodesForTest([_testNode('vless://a', 10)]);
 
-    final future = controller.smartConnectNow();
+    final future = controller.smartConnectNow(verifyWindow: Duration.zero);
     await Future<void>.delayed(Duration.zero);
     await controller.disconnectNow();
-    // Let the still-pending core call resolve so smartConnectNow's awaited
-    // connectBest() can observe the cancellation and return.
+    // 放行挂起的核心实测，让仍在 await 的 connectAndVerify 观察到取消并返回。
     gateway.pending!.complete(50);
     await future;
 
     expect(controller.connectedNode, isNull);
-    expect(controller.statusMessage, '未连接');
+    expect(controller.connectionState, V2rayConnectionState.disconnected);
+    expect(controller.busy, isFalse);
+  });
+
+  test('smartConnectNow connects without any prior retest (all delays null)', () async {
+    final gateway = FakeV2rayGateway(
+      delayScript: {'vless://a': 20, 'vless://b': 10},
+      connectedDelays: [50],
+    );
+    final controller = _buildController(gateway: gateway);
+    await controller.loadInitial();
+    controller.debugSetNodesForTest([_rawNode('vless://a'), _rawNode('vless://b')]);
+    expect(controller.nodes.every((n) => n.delayMs == null), isTrue);
+
+    await controller.smartConnectNow(verifyWindow: Duration.zero);
+
+    expect(controller.connectedNode, isNotNull);
+    expect(controller.connectionState, V2rayConnectionState.connected);
+    expect(controller.statusMessage, contains('已连接'));
+    expect(controller.busy, isFalse);
+  });
+
+  test('smartConnectNow tries nodes previously marked as timed out', () async {
+    // 两个节点的旧数据都是「超时」(-1)，只有其中之一这回能测通——
+    // 证明超时节点不会被排除，旧数据不可信。
+    final gateway = FakeV2rayGateway(
+      delayScript: {'vless://t': 30},
+      connectedDelays: [50],
+    );
+    final controller = _buildController(gateway: gateway);
+    await controller.loadInitial();
+    controller.debugSetNodesForTest([
+      _testNode('vless://x', -1),
+      _testNode('vless://t', -1),
+    ]);
+
+    await controller.smartConnectNow(verifyWindow: Duration.zero);
+
+    expect(controller.connectedNode?.id, 'vless://t');
+    expect(controller.statusMessage, contains('已连接'));
+  });
+
+  test('smartConnectNow persists the delays it discovers while hunting', () async {
+    final gateway = FakeV2rayGateway(
+      delayScript: {'vless://a': 25},
+      connectedDelays: [50],
+    );
+    final controller = _buildController(gateway: gateway);
+    await controller.loadInitial();
+    controller.debugSetNodesForTest([_rawNode('vless://a')]);
+
+    await controller.smartConnectNow(verifyWindow: Duration.zero);
+
+    final cached = await StorageService().loadNodeDelays();
+    expect(cached['vless://a'], 25);
+    expect(controller.lastRetestAt, isNotNull);
+  });
+
+  test('cancelHunt stops the hunt without connecting', () async {
+    final gate = Completer<void>();
+    final gateway = FakeV2rayGateway(
+      gate: gate,
+      delayScript: {'vless://a': 10},
+      connectedDelays: [50],
+    );
+    final controller = _buildController(gateway: gateway);
+    await controller.loadInitial();
+    controller.debugSetNodesForTest([
+      for (var i = 0; i < 20; i++) _rawNode('vless://n$i'),
+    ]);
+
+    // 不 await：让猎取卡在第一批的测速闸门前，再中途取消并放行。
+    final future = controller.smartConnectNow(
+      batchSize: 8,
+      concurrency: 8,
+      verifyWindow: Duration.zero,
+    );
+    await Future<void>.delayed(Duration.zero);
+    controller.cancelHunt();
+    gate.complete();
+    await future;
+
+    expect(controller.connectedNode, isNull);
+    expect(controller.busy, isFalse);
+    expect(controller.hunting, isFalse);
+    expect(controller.statusMessage, contains('已停止寻找'));
+  });
+
+  test('smartConnectNow reports failure when nothing works', () async {
+    final gateway = FakeV2rayGateway(
+      delayScript: {'vless://a': 10},
+      connectedDelays: const [],   // 核心经该节点始终取不到数据
+    );
+    final controller = _buildController(gateway: gateway);
+    await controller.loadInitial();
+    controller.debugSetNodesForTest([_rawNode('vless://a')]);
+
+    await controller.smartConnectNow(verifyWindow: Duration.zero);
+
+    expect(controller.statusMessage, contains('找不到可用节点'));
+    expect(controller.connectedNode, isNull);
+    expect(controller.busy, isFalse);
   });
 
   test('bootstrap() fetches subscriptions on the startup path (regression: node count was always 0)',

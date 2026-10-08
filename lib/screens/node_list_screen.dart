@@ -55,11 +55,27 @@ class _NodeListScreenState extends State<NodeListScreen> {
           body: Column(
             children: [
               ConnectionBar(controller: controller),
-              // 上次测速时间：有记录且当前不在测速中才显示（测速中看进度行即可）。
-              if (controller.lastRetestAt != null && !controller.retesting)
+              // 上次测速时间：有记录且当前不在测速/猎取中才显示（进行中看进度行即可）。
+              if (controller.lastRetestAt != null &&
+                  !controller.retesting &&
+                  !controller.hunting)
                 _LastRetestRow(controller: controller),
               // 测速进度行：仅在批量测速进行中插入。
-              if (controller.retesting) _RetestProgressRow(controller: controller),
+              if (controller.retesting)
+                _ProgressRow(
+                  label: '测速中',
+                  done: controller.retestDone,
+                  total: controller.retestTotal,
+                  onStop: controller.cancelRetest,
+                ),
+              // 自动猎取进度行：与测速互斥（猎取时 retesting 为 false）。
+              if (controller.hunting)
+                _ProgressRow(
+                  label: '正在寻找可用节点',
+                  done: controller.huntDone,
+                  total: controller.huntTotal,
+                  onStop: controller.cancelHunt,
+                ),
               Expanded(
                 child: RefreshIndicator(
                   onRefresh: controller.refreshSubscriptions,
@@ -172,14 +188,23 @@ class _EmptyNodeList extends StatelessWidget {
   }
 }
 
-/// 测速进度 + 停止按钮。抽成独立 widget，避免堆进 Column 的 children。
-class _RetestProgressRow extends StatelessWidget {
-  const _RetestProgressRow({required this.controller});
-  final AppController controller;
+/// 进度 + 停止按钮。测速与自动猎取共用：只是标签、进度与停止回调不同。
+/// 抽成独立 widget，避免把这两种行堆进 Column 的 children。
+class _ProgressRow extends StatelessWidget {
+  const _ProgressRow({
+    required this.label,
+    required this.done,
+    required this.total,
+    required this.onStop,
+  });
+
+  final String label;
+  final int done;
+  final int total;
+  final VoidCallback onStop;
 
   @override
   Widget build(BuildContext context) {
-    final total = controller.retestTotal;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       child: Row(
@@ -187,13 +212,13 @@ class _RetestProgressRow extends StatelessWidget {
           Expanded(
             child: LinearProgressIndicator(
               // total 为 0 时用不确定进度（null），避免除零。
-              value: total > 0 ? controller.retestDone / total : null,
+              value: total > 0 ? done / total : null,
             ),
           ),
           const SizedBox(width: 12),
-          Text('测速中 ${controller.retestDone}/$total'),
+          Text('$label $done/$total'),
           TextButton(
-            onPressed: controller.cancelRetest,
+            onPressed: onStop,
             child: const Text('停止'),
           ),
         ],

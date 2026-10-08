@@ -122,6 +122,27 @@ void main() {
     expect(find.byType(LinearProgressIndicator), findsOneWidget);
   });
 
+  testWidgets('hunting shows the progress row and a progress indicator', (tester) async {
+    final v2rayService = V2rayService(FakeV2rayGateway());
+    final controller = AppController(
+      storage: StorageService(),
+      subscriptionService: SubscriptionService(),
+      v2rayService: v2rayService,
+      smartConnect: SmartConnectService(v2rayService),
+      httpClient: MockClient((_) async => http.Response('', 404)),
+    );
+    await controller.loadInitial();
+    // hunting 是 getter（huntTotal > 0），设 total/done 即可进入猎取态。
+    controller.huntTotal = 10;
+    controller.huntDone = 3;
+
+    await tester.pumpWidget(MaterialApp(home: NodeListScreen(controller: controller)));
+
+    expect(find.textContaining('正在寻找可用节点'), findsOneWidget);
+    expect(find.text('正在寻找可用节点 3/10'), findsOneWidget);
+    expect(find.byType(LinearProgressIndicator), findsOneWidget);
+  });
+
   testWidgets('FAB is disabled while busy', (tester) async {
     final v2rayService = V2rayService(FakeV2rayGateway());
     final controller = AppController(

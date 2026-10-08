@@ -49,6 +49,19 @@ class AppController extends ChangeNotifier {
     _retestCancelled = true;
   }
 
+  int huntDone = 0;
+  int huntTotal = 0;
+  bool _huntCancelled = false;
+
+  /// 正在自动猎取可用节点（UI 用它显示「正在寻找可用节点 x/y」）。
+  bool get hunting => huntTotal > 0;
+
+  /// 请求停止自动猎取。
+  void cancelHunt() {
+    if (huntTotal == 0) return;
+    _huntCancelled = true;
+  }
+
   @visibleForTesting
   void debugSetNodesForTest(List<ProxyNode> testNodes) {
     nodes = testNodes;
@@ -162,14 +175,7 @@ class AppController extends ChangeNotifier {
         : '测速完成 · $usable/${nodes.length} 个可用';
 
     // 落盘：被取消时也要写——已测到的部分正是「可中断」要留住的东西。
-    // 只收 delayMs 非 null 的节点（未测的宁可下次重测，也不许当成测过）。
-    // 该 map 只含当前仍在 nodes 里的节点，天然完成裁剪。
-    _delayCache = {
-      for (final n in nodes)
-        if (n.delayMs != null) n.rawLink: n.delayMs!,
-    };
-    lastRetestAt = DateTime.now();
-    await storage.saveNodeDelays(_delayCache, lastRetestAt!);
+    await _persistDelays();
 
     retestTotal = 0;
     retestDone = 0;
@@ -177,49 +183,153 @@ class AppController extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> smartConnectNow() async {
-    final hasCandidates = nodes.any((n) => n.delayMs != null && n.delayMs! >= 0);
-    if (!hasCandidates) {
-      statusMessage = '还没有可用延迟数据，请先测速';
-      notifyListeners();
-      return;
-    }
+  /// 从当前 [nodes] 构建延迟缓存并落盘。只收 `delayMs` 非 null 的节点
+  /// （未测的宁可下次重测，也不许当成测过）；map 只含当前仍在 nodes 里的
+  /// 节点，天然完成裁剪。`_runRetest` 与自动猎取共用同一段收尾。
+  Future<void> _persistDelays() async {
+    _delayCache = {
+      for (final n in nodes)
+        if (n.delayMs != null) n.rawLink: n.delayMs!,
+    };
+    lastRetestAt = DateTime.now();
+    await storage.saveNodeDelays(_delayCache, lastRetestAt!);
+  }
 
-    statusMessage = '智能连接中…';
+  /// 自动猎取的候选顺序：**不排除任何人，只是排序**。
+  ///   1) 可用（`delayMs >= 0`）按延迟升序；
+  ///   2) 未测速（`delayMs == null`）保持原相对顺序；
+  ///   3) 超时（`delayMs < 0`）保持原相对顺序。
+  /// 用稳定分区实现：`List.sort` 不是稳定排序，直接整条排会把后两段打乱。
+  List<ProxyNode> _huntOrder(List<ProxyNode> input) {
+    final usable = <ProxyNode>[];
+    final untested = <ProxyNode>[];
+    final timedOut = <ProxyNode>[];
+    for (final node in input) {
+      final delay = node.delayMs;
+      if (delay == null) {
+        untested.add(node);
+      } else if (delay >= 0) {
+        usable.add(node);
+      } else {
+        timedOut.add(node);
+      }
+    }
+    usable.sort((a, b) => a.delayMs!.compareTo(b.delayMs!));
+    return [...usable, ...untested, ...timedOut];
+  }
+
+  /// 傻瓜式一键连接：按下即**自动猎取**当下可达的节点并连上，
+  /// 不需要用户先手动测速、也不需要挑节点。
+  ///
+  /// 网络会按 IP、时变地丢弃节点服务器，所以旧延迟（尤其「超时」）都不可信：
+  /// 这里**不排除任何节点**，而是按 [_huntOrder] 排序后分批并发重测，
+  /// 每批里实测可用的节点再逐个「连接 + 经核心实测」，第一个通过即成功。
+  ///
+  /// 具名参数只为测试注入极小的预算，生产调用不传、用默认值。
+  Future<void> smartConnectNow({
+    int batchSize = 24,
+    int concurrency = 8,
+    Duration huntBudget = const Duration(seconds: 240),
+    Duration verifyWindow = const Duration(seconds: 8),
+  }) async {
+    // 忙碌时忽略点击，避免与进行中的拉取/测速/手动连接打架。
+    if (busy) return;
+
+    // 把可能还在跑的级联取消，并把旧隧道收干净，避免叠隧道。
+    smartConnect.cancel();
+    await v2rayService.disconnect();
+
+    busy = true;
+    _huntCancelled = false;
+    huntTotal = nodes.length;
+    huntDone = 0;
+    statusMessage = '正在寻找可用节点…';
     notifyListeners();
 
-    final outcome = await smartConnect.connectBest(
-      nodes,
-      onAttempt: (node) {
-        statusMessage = '正在尝试 · ${node.remark}';
+    final deadline = DateTime.now().add(huntBudget);
+
+    try {
+      final queue = _huntOrder(nodes);   // 快照：局部不变，nodes 另行重赋值
+      for (var start = 0; start < queue.length; start += batchSize) {
+        if (_huntCancelled) break;
+        if (!DateTime.now().isBefore(deadline)) break;
+
+        final batch = queue.sublist(
+          start,
+          (start + batchSize).clamp(0, queue.length),
+        );
+
+        final probed = await v2rayService.testDelays(
+          batch,
+          concurrency: concurrency,
+          onProgress: (current, done, total) {
+            // current 是「这一批」的完整列表（已测前缀 + 未测余量），不是全局
+            // 列表：只用它推进进度显示，绝不在这里并回 nodes（会打乱全局顺序）。
+            huntDone = start + done;
+            statusMessage = '正在寻找可用节点 · 已测 $huntDone/$huntTotal';
+            notifyListeners();
+          },
+          shouldStop: () => _huntCancelled,
+        );
+
+        // 用赋值而非 +=：onProgress 已把 huntDone 推到 start + done，
+        // 这里再累加会重复计数。
+        huntDone = start + batch.length;
+        statusMessage = '正在寻找可用节点 · 已测 $huntDone/$huntTotal';
         notifyListeners();
-      },
-    );
 
-    switch (outcome.result) {
-      case SmartConnectResult.success:
-        connectedNode = outcome.node;
-        connectionState = V2rayConnectionState.connected;
-        statusMessage = '已连接 · ${outcome.node!.remark}';
-        await storage.saveLastConnectedNodeId(outcome.node!.id);
-        break;
-      case SmartConnectResult.allFailed:
-        connectedNode = null;
-        connectionState = V2rayConnectionState.disconnected;
-        statusMessage = '全部节点都取不到数据，请刷新订阅或换节点重试';
-        break;
-      case SmartConnectResult.noCandidates:
-        connectedNode = null;
-        connectionState = V2rayConnectionState.disconnected;
-        statusMessage = '还没有可用延迟数据，请先测速';
-        break;
-      case SmartConnectResult.cancelled:
-        connectedNode = null;
-        connectionState = V2rayConnectionState.disconnected;
-        statusMessage = '未连接';
-        break;
+        // 批测完统一合并：把这一批的最新延迟按 rawLink 并回 nodes 并重排，
+        // 然后落盘——猎取过程顺便把测速结果攒下来，用户下次不用重测。
+        final probedDelays = {
+          for (final p in probed)
+            if (p.delayMs != null) p.rawLink: p.delayMs!,
+        };
+        nodes = sortByDelay(
+          applyCachedDelays(nodes, probedDelays, testedAt: DateTime.now()),
+        );
+        await _persistDelays();
+
+        // 这一批里实测可用的节点，按延迟升序逐个「连接 + 经核心实测」。
+        final candidates = probed
+            .where((n) => n.delayMs != null && n.delayMs! >= 0)
+            .toList()
+          ..sort((a, b) => a.delayMs!.compareTo(b.delayMs!));
+
+        for (final node in candidates) {
+          if (_huntCancelled) break;
+          if (!DateTime.now().isBefore(deadline)) break;
+
+          statusMessage = '正在尝试 · ${node.remark}';
+          notifyListeners();
+
+          final outcome = await smartConnect.connectAndVerify(
+            node,
+            establishWindow: verifyWindow,
+          );
+          if (outcome == ConnectOutcome.verified) {
+            connectedNode = node;
+            connectionState = V2rayConnectionState.connected;
+            statusMessage = '已连接 · ${node.remark}';
+            await storage.saveLastConnectedNodeId(node.id);
+            return;   // 猎取成功，finally 仍会复位状态
+          }
+          // 失败（权限被拒 / 经该节点取不到数据）→ 继续这一批的下一个。
+        }
+      }
+
+      // 全部走完 / 超预算 / 被取消：确保断开、状态一致。
+      await v2rayService.disconnect();
+      connectedNode = null;
+      connectionState = V2rayConnectionState.disconnected;
+      statusMessage = _huntCancelled
+          ? '已停止寻找'
+          : '暂时找不到可用节点（网络可能正在拦截），请稍后重试或换网络';
+    } finally {
+      huntTotal = 0;
+      huntDone = 0;
+      busy = false;
+      notifyListeners();
     }
-    notifyListeners();
   }
 
   /// 连接用户手动选中的节点。允许连**未测速**的节点（用户明确要这个）。
