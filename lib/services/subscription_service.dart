@@ -18,6 +18,45 @@ String normalizeContent(String rawBody) {
   return rawBody;
 }
 
+/// GitHub 系内容的前缀式中转镜像(直接把原 URL 拼在后面)。
+///
+/// 2026-10-08 手机侧实测:`raw.githubusercontent.com` 会被中间盒放行一个
+/// 约 32KiB 的突发窗口后停转 —— 小文件偶尔抢在窗口内跑完,大文件基本必卡死。
+/// 下列镜像同一时段全部 200 且亚秒级返回,顺序即优先级(gh-proxy.com 最快)。
+/// 只对 GitHub 系 URL 生效:前缀式镜像套在别的域名上只会 404。
+const List<String> kSubscriptionMirrors = <String>[
+  'https://gh-proxy.com/',
+  'https://ghproxy.net/',
+  'https://ghfast.top/',
+];
+
+/// 该 URL 是否指向 GitHub 的原始文件内容。
+/// 覆盖 `raw.githubusercontent.com`、`gist.githubusercontent.com`、
+/// 以及 `github.com/<owner>/<repo>/raw/<ref>/...` 三种形态。
+bool isGitHubRawUrl(Uri uri) {
+  // host 大小写不敏感,DNS 层面本就不区分,统一小写后再比。
+  final host = uri.host.toLowerCase();
+  if (host == 'raw.githubusercontent.com') return true;
+  if (host == 'gist.githubusercontent.com') return true;
+  // github.com 上只有 /raw/ 这条路径才是原始文件,仓库首页等不是。
+  if (host == 'github.com' && uri.path.contains('/raw/')) return true;
+  return false;
+}
+
+/// 把一个订阅 URL 展开成「依次尝试」的候选链:**直连优先**,其后是镜像。
+///
+/// 非 GitHub URL 只返回直连本身。已经是镜像格式的 URL 不会被重复套娃
+/// —— 镜像域名不满足 [isGitHubRawUrl],自然只回自身。
+List<Uri> subscriptionCandidates(Uri original) {
+  if (!isGitHubRawUrl(original)) return <Uri>[original];
+  // 直接做字符串拼接而非 Uri 的 API 组合:镜像要的就是「原样把整个 URL 接在
+  // 域名后面」,用 Uri 组合反而会把嵌套 URL 里的 // 规范化掉。
+  return <Uri>[
+    original,
+    for (final mirror in kSubscriptionMirrors) Uri.parse('$mirror$original'),
+  ];
+}
+
 class FetchResult {
   FetchResult({required this.nodes, this.error});
   final List<ProxyNode> nodes;
@@ -37,20 +76,41 @@ class _AttemptResult {
 class SubscriptionService {
   /// 拉取并解析一个订阅源。
   ///
-  /// [maxAttempts] 是**总尝试次数**（含首次），默认 2 = 首次 + 重试 1 次；
+  /// [maxAttempts] 是**总请求次数上限**（含首次），不再指「重试同一个 URL 的
+  /// 次数」。GitHub 系 URL 会展开成「直连 + 若干镜像」的候选链依次尝试，
+  /// 链走完还有剩余次数就从头再循环；默认 4 恰好覆盖 GitHub 链的一整遍。
+  ///
+  /// [timeout] 默认 8s:失败模式是「连上、回 200、body 不动」的卡死,
+  /// 只能靠短超时快速换道;实测镜像亚秒级返回,8s 足够宽裕。
+  ///
   /// 每次尝试之间等待 [retryBackoff]（最后一次失败后不再等待）。
-  /// 只有「可重试」的失败才会重试，见 [_attempt]。
+  /// 只有「可重试」的失败才会换下一条候选，见 [_attempt]。
   Future<FetchResult> fetchAndParse(
     ProxySubscription sub, {
     http.Client? client,
-    Duration timeout = const Duration(seconds: 20),
-    int maxAttempts = 2,
+    Duration timeout = const Duration(seconds: 8),
+    int maxAttempts = 4,
     Duration retryBackoff = const Duration(milliseconds: 500),
   }) async {
     final httpClient = client ?? http.Client();
+    // 候选链只算一次:同一批候选在整个尝试过程中保持不变。
+    //
+    // Uri.parse 对畸形地址（`: //x`、含空格、坏的 IPv6 字面量等）会抛
+    // FormatException,必须在这里就地转成 error —— fetchAndParse 的契约是
+    // 「绝不抛异常」,而它上游的 refreshSubscriptions 没有 try/finally,
+    // 一旦抛出会把 busy 永久卡在 true,连节点点击都会被静默丢弃。
+    // 畸形地址不可重试:再解析一万次也还是畸形,也不该发任何网络请求。
+    final List<Uri> candidates;
+    try {
+      candidates = subscriptionCandidates(Uri.parse(sub.url));
+    } catch (e) {
+      return FetchResult(nodes: const [], error: '订阅地址无法解析:$e');
+    }
     var last = FetchResult(nodes: const [], error: '未发起请求');
     for (var attempt = 1; attempt <= maxAttempts; attempt++) {
-      final result = await _attempt(httpClient, sub, timeout);
+      // 链尾之后从头再循环,非 GitHub 的 1 条链等于反复重试同一个 URL。
+      final target = candidates[(attempt - 1) % candidates.length];
+      final result = await _attempt(httpClient, target, sub.id, timeout);
       last = FetchResult(nodes: result.nodes, error: result.error);
       if (result.error == null) return last;
       if (!result.retryable) return last;
@@ -60,16 +120,18 @@ class SubscriptionService {
     return last;
   }
 
-  /// 发起单次请求并解析。失败时标注是否值得重试：
+  /// 对某一条候选 [target] 发起单次请求并解析。失败时标注是否值得换下一条候选
+  /// （[maxAttempts] 的每一次循环就是换一条）：
   /// 网络类异常、以及 5xx / 429（限流或服务端临时故障）可重试；
   /// 其余 4xx（404 / 403 / 401 等）重试无意义，不重试。
   Future<_AttemptResult> _attempt(
     http.Client httpClient,
-    ProxySubscription sub,
+    Uri target,
+    String sourceSubId,
     Duration timeout,
   ) async {
     try {
-      final response = await httpClient.get(Uri.parse(sub.url)).timeout(timeout);
+      final response = await httpClient.get(target).timeout(timeout);
       if (response.statusCode != 200) {
         final retryable =
             response.statusCode >= 500 || response.statusCode == 429;
@@ -91,8 +153,17 @@ class SubscriptionService {
           remark: meta.remark,
           protocol: meta.protocol,
           rawLink: trimmedLine,
-          sourceSubId: sub.id,
+          sourceSubId: sourceSubId,
         ));
+      }
+      // 200 但一个节点都解析不出——截断的 body、镜像返回的 HTML 错误页都
+      // 落到这里。当作可重试失败换下一条候选,总好过把一个空订阅当成功。
+      if (nodes.isEmpty) {
+        return _AttemptResult(
+          nodes: const [],
+          error: '解析出 0 个节点',
+          retryable: true,
+        );
       }
       return _AttemptResult(nodes: nodes);
     } catch (e) {

@@ -31,6 +31,64 @@ void main() {
     });
   });
 
+  group('subscriptionCandidates', () {
+    test('raw.githubusercontent.com expands to direct + three mirrors in priority order', () {
+      final candidates = subscriptionCandidates(
+        Uri.parse('https://raw.githubusercontent.com/a/b/main/c.txt'),
+      );
+
+      expect(candidates, hasLength(4));
+      expect(candidates[0].toString(),
+          'https://raw.githubusercontent.com/a/b/main/c.txt');
+      expect(candidates[1].toString(), startsWith('https://gh-proxy.com/'));
+      expect(candidates[2].toString(), startsWith('https://ghproxy.net/'));
+      expect(candidates[3].toString(), startsWith('https://ghfast.top/'));
+    });
+
+    test('mirror candidate keeps the nested URL byte-for-byte (no // collapsing)', () {
+      final candidates = subscriptionCandidates(
+        Uri.parse('https://raw.githubusercontent.com/a/b/main/c.txt'),
+      );
+
+      // 钉死:前缀式镜像就是「原样拼接」,嵌套 URL 里的 // 不能被规范化掉。
+      expect(candidates[1].toString(),
+          'https://gh-proxy.com/https://raw.githubusercontent.com/a/b/main/c.txt');
+    });
+
+    test('gist.githubusercontent.com expands to four candidates', () {
+      final candidates = subscriptionCandidates(
+        Uri.parse('https://gist.githubusercontent.com/u/abc/raw/x.txt'),
+      );
+
+      expect(candidates, hasLength(4));
+    });
+
+    test('github.com/<owner>/<repo>/raw/... expands to four candidates', () {
+      final candidates = subscriptionCandidates(
+        Uri.parse('https://github.com/o/r/raw/main/sub.txt'),
+      );
+
+      expect(candidates, hasLength(4));
+    });
+
+    test('non-GitHub URL yields only the direct candidate, unchanged', () {
+      final original = Uri.parse('https://example.com/sub.txt');
+
+      final candidates = subscriptionCandidates(original);
+
+      expect(candidates, hasLength(1));
+      expect(candidates.first, same(original));
+    });
+
+    test('an already-mirrored URL is not wrapped again', () {
+      final candidates = subscriptionCandidates(
+        Uri.parse('https://gh-proxy.com/https://raw.githubusercontent.com/a/b'),
+      );
+
+      expect(candidates, hasLength(1));
+    });
+  });
+
   group('SubscriptionService.fetchAndParse', () {
     test('parses a base64 subscription body into nodes', () async {
       final raw = 'trojan://a@b:443#Node1\nvless://c@d:443#Node2';
@@ -76,20 +134,49 @@ void main() {
       final service = SubscriptionService();
       final sub = ProxySubscription(id: 'u4', name: 'S4', url: 'https://x/unreachable');
 
-      final result = await service.fetchAndParse(sub, client: client);
+      final result = await service.fetchAndParse(
+        sub,
+        client: client,
+        retryBackoff: Duration.zero,
+      );
 
       expect(result.nodes, isEmpty);
       expect(result.error, isNotNull);
     });
 
-    test('empty/garbage body with no recognizable links yields zero nodes, no error thrown', () async {
+    test('empty/garbage body yields zero nodes and records an error, without throwing', () async {
       final client = MockClient((request) async => http.Response('<html>rate limited</html>', 200));
       final service = SubscriptionService();
       final sub = ProxySubscription(id: 'u5', name: 'S5', url: 'https://x/garbage');
 
-      final result = await service.fetchAndParse(sub, client: client);
+      final result = await service.fetchAndParse(
+        sub,
+        client: client,
+        retryBackoff: Duration.zero,
+      );
 
       expect(result.nodes, isEmpty);
+      // 200 但解析不出节点如今算可重试失败，会记 error（仍不抛异常）。
+      expect(result.error, isNotNull);
+    });
+
+    test('malformed URL yields an error without throwing and without any request', () async {
+      var calls = 0;
+      final client = MockClient((request) async {
+        calls++;
+        return http.Response('vless://a@x:443#A', 200);
+      });
+      final service = SubscriptionService();
+      // '://x' 实测会让 Uri.parse 抛 FormatException；空串/'not a url' 不会，
+      // 拿后者当用例等于空断言。
+      final sub = ProxySubscription(id: 'u6', name: 'S6', url: '://x');
+
+      final result = await service.fetchAndParse(sub, client: client);
+
+      expect(result.error, isNotNull);
+      expect(result.nodes, isEmpty);
+      // 畸形地址不该发任何网络请求。
+      expect(calls, 0);
     });
 
     // 以下为「重试 / 超时」行为测试。为避免真等退避时间，
@@ -122,8 +209,12 @@ void main() {
       final service = SubscriptionService();
       final sub = ProxySubscription(id: 'r2', name: 'R2', url: 'https://x/down');
 
-      final result =
-          await service.fetchAndParse(sub, client: client, retryBackoff: Duration.zero);
+      final result = await service.fetchAndParse(
+        sub,
+        client: client,
+        maxAttempts: 2,
+        retryBackoff: Duration.zero,
+      );
 
       expect(result.nodes, isEmpty);
       expect(result.error, isNotNull);
@@ -202,6 +293,114 @@ void main() {
       expect(result.error, isNotNull);
       // 宽匹配：具体的超时异常文案随 SDK 变化，不去钉死。
       expect(result.error, contains('imeout'));
+    });
+
+    // 以下为「直连 → GitHub 镜像」降级链测试。用 GitHub 系 URL 才会展开
+    // 多候选；记录每次请求的 URL 来断言确实换了道。
+
+    test('direct failure falls back to the first mirror and succeeds', () async {
+      final requested = <Uri>[];
+      var calls = 0;
+      final client = MockClient((request) async {
+        requested.add(request.url);
+        calls++;
+        if (calls == 1) throw http.ClientException('connection reset');
+        return http.Response('vless://a@x:443#A', 200);
+      });
+      final service = SubscriptionService();
+      final sub = ProxySubscription(
+        id: 'g1',
+        name: 'G1',
+        url: 'https://raw.githubusercontent.com/a/b/main/c.txt',
+      );
+
+      final result = await service.fetchAndParse(
+        sub,
+        client: client,
+        retryBackoff: Duration.zero,
+      );
+
+      expect(result.error, isNull);
+      expect(result.nodes, isNotEmpty);
+      expect(requested, hasLength(2));
+      expect(requested[1].toString(), startsWith('https://gh-proxy.com/'));
+    });
+
+    test('direct 200 with zero parsed nodes falls back to the mirror', () async {
+      final requested = <Uri>[];
+      var calls = 0;
+      final client = MockClient((request) async {
+        requested.add(request.url);
+        calls++;
+        // 截断 / HTML 错误页：连接和状态码都正常，但一个节点都解析不出。
+        if (calls == 1) return http.Response('<html>rate limited</html>', 200);
+        return http.Response('trojan://a@b:443#Node1', 200);
+      });
+      final service = SubscriptionService();
+      final sub = ProxySubscription(
+        id: 'g2',
+        name: 'G2',
+        url: 'https://raw.githubusercontent.com/a/b/main/c.txt',
+      );
+
+      final result = await service.fetchAndParse(
+        sub,
+        client: client,
+        retryBackoff: Duration.zero,
+      );
+
+      expect(result.error, isNull);
+      expect(result.nodes, hasLength(1));
+      expect(requested, hasLength(2));
+      expect(requested[1].toString(), startsWith('https://gh-proxy.com/'));
+    });
+
+    test('all candidates failing reports error with exactly maxAttempts calls', () async {
+      var calls = 0;
+      final client = MockClient((request) async {
+        calls++;
+        throw http.ClientException('down');
+      });
+      final service = SubscriptionService();
+      final sub = ProxySubscription(
+        id: 'g3',
+        name: 'G3',
+        url: 'https://raw.githubusercontent.com/a/b/main/c.txt',
+      );
+
+      final result = await service.fetchAndParse(
+        sub,
+        client: client,
+        maxAttempts: 4,
+        retryBackoff: Duration.zero,
+      );
+
+      expect(result.error, isNotNull);
+      expect(result.nodes, isEmpty);
+      expect(calls, 4);
+    });
+
+    test('direct 404 stops immediately without trying mirrors', () async {
+      var calls = 0;
+      final client = MockClient((request) async {
+        calls++;
+        return http.Response('', 404);
+      });
+      final service = SubscriptionService();
+      final sub = ProxySubscription(
+        id: 'g4',
+        name: 'G4',
+        url: 'https://raw.githubusercontent.com/a/b/main/c.txt',
+      );
+
+      final result = await service.fetchAndParse(
+        sub,
+        client: client,
+        retryBackoff: Duration.zero,
+      );
+
+      expect(calls, 1);
+      expect(result.error, contains('404'));
     });
   });
 
