@@ -103,26 +103,6 @@ void main() {
     expect(find.textContaining('正在拉取订阅'), findsOneWidget);
   });
 
-  testWidgets('retesting shows the progress row and a progress indicator', (tester) async {
-    final v2rayService = V2rayService(FakeV2rayGateway());
-    final controller = AppController(
-      storage: StorageService(),
-      subscriptionService: SubscriptionService(),
-      v2rayService: v2rayService,
-      smartConnect: SmartConnectService(v2rayService),
-      httpClient: MockClient((_) async => http.Response('', 404)),
-    );
-    await controller.loadInitial();
-    // retesting 是 getter（retestTotal > 0），设 total 即可进入测速态。
-    controller.retestTotal = 554;
-    controller.retestDone = 37;
-
-    await tester.pumpWidget(MaterialApp(home: NodeListScreen(controller: controller)));
-
-    expect(find.text('测速中 37/554'), findsOneWidget);
-    expect(find.byType(LinearProgressIndicator), findsOneWidget);
-  });
-
   testWidgets('hunting shows the progress row and a progress indicator', (tester) async {
     final v2rayService = V2rayService(FakeV2rayGateway());
     final controller = AppController(
@@ -142,24 +122,6 @@ void main() {
     expect(find.textContaining('正在寻找可用节点'), findsOneWidget);
     expect(find.text('正在寻找可用节点 3/10'), findsOneWidget);
     expect(find.byType(LinearProgressIndicator), findsOneWidget);
-  });
-
-  testWidgets('FAB is disabled while busy', (tester) async {
-    final v2rayService = V2rayService(FakeV2rayGateway());
-    final controller = AppController(
-      storage: StorageService(),
-      subscriptionService: SubscriptionService(),
-      v2rayService: v2rayService,
-      smartConnect: SmartConnectService(v2rayService),
-      httpClient: MockClient((_) async => http.Response('', 404)),
-    );
-    await controller.loadInitial();
-    controller.busy = true;
-
-    await tester.pumpWidget(MaterialApp(home: NodeListScreen(controller: controller)));
-
-    final fab = tester.widget<FloatingActionButton>(find.byType(FloatingActionButton));
-    expect(fab.onPressed, isNull);
   });
 
   testWidgets('tapping a node row connects to that node', (tester) async {
@@ -211,7 +173,7 @@ void main() {
     expect(controller.statusMessage, contains('已连接'));
   });
 
-  testWidgets('shows the last retest time when available and not retesting', (tester) async {
+  testWidgets('shows the last retest time when available and not hunting', (tester) async {
     final v2rayService = V2rayService(FakeV2rayGateway());
     final controller = AppController(
       storage: StorageService(),

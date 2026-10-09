@@ -57,24 +57,11 @@ class AppController extends ChangeNotifier {
   String statusMessage = '未连接';
   bool busy = false;
 
-  int retestDone = 0;
-  int retestTotal = 0;
-  bool _retestCancelled = false;
-
   /// 已测出的延迟，按 rawLink 索引；落盘后跨启动复用。
   Map<String, int> _delayCache = {};
 
   /// 上次测速时间（UI 用它显示「上次测速 M/d HH:mm」）。
   DateTime? lastRetestAt;
-
-  /// 正在批量测速中（用于 UI 显示进度条）。
-  bool get retesting => retestTotal > 0;
-
-  /// 请求中止正在进行的测速。已测到的结果保留，未测的保持「未测速」。
-  void cancelRetest() {
-    if (retestTotal == 0) return;
-    _retestCancelled = true;
-  }
 
   int huntDone = 0;
   int huntTotal = 0;
@@ -106,13 +93,14 @@ class AppController extends ChangeNotifier {
   }
 
   /// 启动路径：先读本地存储，再拉一次订阅。**不自动测速**——
-  /// 默认源去重后有 554 个节点，全量测速要 1–6 分钟，何时开始由用户点「测速」决定。
+  /// 默认源去重后有 554 个节点，全量测速要 1–6 分钟；测速已收敛进
+  /// 「一键连接」的猎取过程，启动时只拉订阅、不测速。
   Future<void> bootstrap() async {
     await loadInitial();
-    await refreshSubscriptions(retest: false);
+    await refreshSubscriptions();
   }
 
-  Future<void> refreshSubscriptions({bool retest = true}) async {
+  Future<void> refreshSubscriptions() async {
     busy = true;
     notifyListeners();
 
@@ -153,66 +141,14 @@ class AppController extends ChangeNotifier {
     ));
     await storage.saveSubscriptions(subscriptions);
 
-    if (retest) {
-      await _runRetest();            // spec §8：下拉刷新 = 重新拉订阅 + 全量重测
-    } else {
-      busy = false;
-      notifyListeners();
-    }
-  }
-
-  Future<void> retestAll() async {
-    busy = true;
-    notifyListeners();
-    await _runRetest();
-  }
-
-  Future<void> _runRetest() async {
-    _retestCancelled = false;
-
-    if (nodes.isEmpty) {
-      retestTotal = 0;
-      retestDone = 0;
-      statusMessage = '还没有节点，请先刷新订阅';
-      busy = false;
-      notifyListeners();
-      return;
-    }
-
-    final input = nodes;   // 快照。注意：全程只「重赋值」nodes，绝不原地增删改，
-                           // 否则会破坏 testDelays 正在遍历的那个 list。
-    retestTotal = input.length;
-    retestDone = 0;
-    notifyListeners();
-
-    nodes = await v2rayService.testDelays(
-      input,
-      onProgress: (current, done, total) {
-        retestDone = done;
-        nodes = sortByDelay(current);   // spec §7.2/§8：实时回填 + 按延迟升序
-        notifyListeners();
-      },
-      shouldStop: () => _retestCancelled,
-    );
-    nodes = sortByDelay(nodes);
-
-    final usable = nodes.where((n) => n.delayMs != null && n.delayMs! >= 0).length;
-    statusMessage = _retestCancelled
-        ? '测速已停止（已完成 $retestDone/$retestTotal）'
-        : '测速完成 · $usable/${nodes.length} 个可用';
-
-    // 落盘：被取消时也要写——已测到的部分正是「可中断」要留住的东西。
-    await _persistDelays();
-
-    retestTotal = 0;
-    retestDone = 0;
+    // 拉完即结束：测速不再由刷新触发，已收敛进「一键连接」的猎取过程。
     busy = false;
     notifyListeners();
   }
 
   /// 从当前 [nodes] 构建延迟缓存并落盘。只收 `delayMs` 非 null 的节点
   /// （未测的宁可下次重测，也不许当成测过）；map 只含当前仍在 nodes 里的
-  /// 节点，天然完成裁剪。`_runRetest` 与自动猎取共用同一段收尾。
+  /// 节点，天然完成裁剪。由自动猎取在每批测速后调用。
   Future<void> _persistDelays() async {
     _delayCache = {
       for (final n in nodes)

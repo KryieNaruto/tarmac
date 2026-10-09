@@ -17,7 +17,7 @@ class FakeV2rayGateway implements V2rayGateway {
   final bool startShouldThrow;
 
   /// 可选闸门：不为 null 时 `getServerDelay` 会先 await 它再返回脚本值，
-  /// 测试可用它卡住测速、中途 `cancelRetest()`、再放行。默认 null 行为不变。
+  /// 测试可用它卡住猎取中的测速、中途 `cancelHunt()`、再放行。默认 null 行为不变。
   final Completer<void>? gate;
 
   final _controller = StreamController<V2rayConnectionState>.broadcast();

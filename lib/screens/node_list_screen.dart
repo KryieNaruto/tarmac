@@ -30,9 +30,9 @@ class _NodeListScreenState extends State<NodeListScreen> {
         //   delayMs >= 0     → 可用，算可见
         //   delayMs < 0      → 超时，进收起分区
         //
-        // 注意（有意为之）：测速进行中，节点被逐个测出「超时」后会立刻跳进
-        // 这个收起分区、从可见列表消失。列表因此在测速时不断"缩水"，这正
-        // 是想要的效果——坏节点自动沉下去，可用的往上浮，不必等整轮测速结束。
+        // 注意（有意为之）：自动猎取进行中，节点被逐个测出「超时」后会立刻跳进
+        // 这个收起分区、从可见列表消失。列表因此在猎取时不断"缩水"，这正
+        // 是想要的效果——坏节点自动沉下去，可用的往上浮，不必等整轮猎取结束。
         // 进度行不在 ListView 内，不受此影响。
         final visible = <ProxyNode>[];
         final timedOut = <ProxyNode>[];
@@ -55,20 +55,10 @@ class _NodeListScreenState extends State<NodeListScreen> {
           body: Column(
             children: [
               ConnectionBar(controller: controller),
-              // 上次测速时间：有记录且当前不在测速/猎取中才显示（进行中看进度行即可）。
-              if (controller.lastRetestAt != null &&
-                  !controller.retesting &&
-                  !controller.hunting)
+              // 上次测速时间：有记录且当前不在猎取中才显示（猎取进行中看进度行即可）。
+              if (controller.lastRetestAt != null && !controller.hunting)
                 _LastRetestRow(controller: controller),
-              // 测速进度行：仅在批量测速进行中插入。
-              if (controller.retesting)
-                _ProgressRow(
-                  label: '测速中',
-                  done: controller.retestDone,
-                  total: controller.retestTotal,
-                  onStop: controller.cancelRetest,
-                ),
-              // 自动猎取进度行：与测速互斥（猎取时 retesting 为 false）。
+              // 自动猎取进度行：仅在「一键连接」的猎取进行中插入。
               if (controller.hunting)
                 _ProgressRow(
                   label: '正在寻找可用节点',
@@ -104,23 +94,12 @@ class _NodeListScreenState extends State<NodeListScreen> {
               ),
             ],
           ),
-          floatingActionButton: FloatingActionButton(
-            onPressed: controller.busy ? null : controller.retestAll,
-            tooltip: '仅重测',
-            child: controller.busy
-                ? const SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.speed),
-          ),
         );
       },
     );
   }
 
-  /// 单行节点。测速过程中 nodes 会按延迟实时重排，靠 key 让 Flutter
+  /// 单行节点。猎取过程中 nodes 会按延迟实时重排，靠 key 让 Flutter
   /// 按节点身份复用 element，避免内容串行/闪跳。
   Widget _buildTile(AppController controller, ProxyNode node) {
     final isConnected = controller.connectedNode?.id == node.id;
@@ -188,8 +167,8 @@ class _EmptyNodeList extends StatelessWidget {
   }
 }
 
-/// 进度 + 停止按钮。测速与自动猎取共用：只是标签、进度与停止回调不同。
-/// 抽成独立 widget，避免把这两种行堆进 Column 的 children。
+/// 进度 + 停止按钮。目前仅自动猎取使用：换场景只是标签、进度与停止回调不同。
+/// 抽成独立 widget，避免把这类行堆进 Column 的 children。
 class _ProgressRow extends StatelessWidget {
   const _ProgressRow({
     required this.label,
@@ -227,7 +206,7 @@ class _ProgressRow extends StatelessWidget {
   }
 }
 
-/// 「上次测速 M/d HH:mm」小号灰字行。仅在历史存在且当前不在测速中时插入。
+/// 「上次测速 M/d HH:mm」小号灰字行。仅在历史存在且当前不在猎取中时插入。
 class _LastRetestRow extends StatelessWidget {
   const _LastRetestRow({required this.controller});
   final AppController controller;

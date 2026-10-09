@@ -23,7 +23,7 @@ ProxyNode _testNode(String link, int delayMs) => ProxyNode(
       delayMs: delayMs,
     );
 
-/// 未测速节点（delayMs 为 null），用于测速/取消场景。
+/// 未测速节点（delayMs 为 null），用于猎取/连接等尚未测速的场景。
 ProxyNode _rawNode(String link) => ProxyNode(
       id: link,
       remark: link,
@@ -281,77 +281,6 @@ void main() {
     expect(controller.nodes.every((n) => n.delayMs == null), isTrue);
   });
 
-  test('refreshSubscriptions(retest: false) leaves delays unset; retestAll backfills them', () async {
-    final gateway = FakeV2rayGateway(delayScript: {'vless://a@x:443#A': 42});
-    final client = MockClient((_) async => http.Response('vless://a@x:443#A', 200));
-    final controller = _buildController(httpClient: client, gateway: gateway);
-    await controller.loadInitial();
-
-    await controller.refreshSubscriptions(retest: false);
-    expect(controller.nodes, isNotEmpty);
-    expect(controller.nodes.every((n) => n.delayMs == null), isTrue);
-
-    await controller.retestAll();
-    final node = controller.nodes.firstWhere((n) => n.rawLink == 'vless://a@x:443#A');
-    expect(node.delayMs, 42);
-  });
-
-  test('retestAll sorts nodes by ascending delay', () async {
-    final gateway = FakeV2rayGateway(
-      delayScript: {'vless://slow': 200, 'vless://fast': 50},
-    );
-    final controller = _buildController(gateway: gateway);
-    controller.debugSetNodesForTest([
-      _rawNode('vless://slow'),
-      _rawNode('vless://fast'),
-    ]);
-
-    await controller.retestAll();
-
-    expect(
-      controller.nodes.map((n) => n.rawLink).toList(),
-      ['vless://fast', 'vless://slow'],
-    );
-  });
-
-  test('retestAll on an empty node list completes and reports a friendly status', () async {
-    final controller = _buildController();
-    await controller.loadInitial();
-    expect(controller.nodes, isEmpty);
-
-    await controller.retestAll();
-
-    expect(controller.statusMessage, contains('还没有节点'));
-    expect(controller.busy, isFalse);
-    expect(controller.retesting, isFalse);
-  });
-
-  test('cancelRetest keeps untested nodes and never fabricates their delays', () async {
-    final gate = Completer<void>();
-    final gateway = FakeV2rayGateway(gate: gate);
-    final controller = _buildController(gateway: gateway);
-    await controller.loadInitial();
-    // 节点数必须 > 并发上限：worker 池在闸门前恰好领走 `min(并发, 节点数)` 个，
-    // 若节点数 <= 并发，就全部被领走，「未测到的节点延迟仍为 null」这条断言会落空。
-    final count = kTestConcurrency + 5;
-    controller.debugSetNodesForTest([
-      for (var i = 0; i < count; i++) _rawNode('vless://n$i'),
-    ]);
-
-    // 不 await：让 retestAll 跑到闸门前挂起，再中途取消并放行。
-    final future = controller.retestAll();
-    await Future<void>.delayed(Duration.zero);
-    controller.cancelRetest();
-    gate.complete();
-    await future;
-
-    // 未测节点被保留、没丢。
-    expect(controller.nodes, hasLength(count));
-    expect(controller.statusMessage, contains('测速已停止'));
-    // 未测的节点延迟仍是 null，没有被编造。
-    expect(controller.nodes.any((n) => n.delayMs == null), isTrue);
-  });
-
   test('cached delays survive refreshSubscriptions (regression: delays were dropped every launch)',
       () async {
     SharedPreferences.setMockInitialValues({
@@ -364,57 +293,6 @@ void main() {
 
     final node = controller.nodes.firstWhere((n) => n.rawLink == 'vless://a@x:443#A');
     expect(node.delayMs, 42);
-  });
-
-  test('delays survive a full restart via the disk cache', () async {
-    final client = MockClient((_) async => http.Response('vless://a@x:443#A', 200));
-    final gateway1 = FakeV2rayGateway(delayScript: {'vless://a@x:443#A': 7});
-    final controller1 = _buildController(httpClient: client, gateway: gateway1);
-    await controller1.bootstrap();
-    await controller1.retestAll();
-    expect(
-      controller1.nodes.firstWhere((n) => n.rawLink == 'vless://a@x:443#A').delayMs,
-      7,
-    );
-
-    // 新建 controller 模拟重启，共用同一个 SharedPreferences mock。
-    final controller2 = _buildController(httpClient: client, gateway: FakeV2rayGateway());
-    await controller2.bootstrap();
-
-    final node = controller2.nodes.firstWhere((n) => n.rawLink == 'vless://a@x:443#A');
-    expect(node.delayMs, 7);
-    expect(controller2.lastRetestAt, isNotNull);
-  });
-
-  test('cancelled retest caches only the nodes that were actually tested', () async {
-    final gate = Completer<void>();
-    final gateway = FakeV2rayGateway(gate: gate);
-    final controller = _buildController(gateway: gateway);
-    await controller.loadInitial();
-    // 节点数必须 > 并发上限：worker 池在闸门前恰好领走 `min(并发, 节点数)` 个，
-    // 若节点数 <= 并发，就全部被领走，「未测到的节点不进缓存」这条断言会落空
-    // （扫档时 --dart-define 把并发调到 > 20 也会踩到这一点）。
-    final count = kTestConcurrency + 5;
-    controller.debugSetNodesForTest([
-      for (var i = 0; i < count; i++) _rawNode('vless://n$i'),
-    ]);
-
-    // 不 await：所有 worker 都在闸门前挂起，取消后放行。
-    final future = controller.retestAll();
-    await Future<void>.delayed(Duration.zero);
-    controller.cancelRetest();
-    gate.complete();
-    await future;
-
-    final cached = await StorageService().loadNodeDelays();
-    // 挂起时恰好有 kTestConcurrency 个 worker 各领走一个节点，取消放行后它们全部
-    // 测完（这些「测过但失败」的节点存成 -1，期望行为）；剩下的节点仍为 null，
-    // 不得进缓存。
-    expect(cached, hasLength(kTestConcurrency));
-    for (var i = 0; i < kTestConcurrency; i++) {
-      expect(cached['vless://n$i'], -1);
-    }
-    expect(cached.containsKey('vless://n${count - 1}'), isFalse);
   });
 
   test('merged cached delays are ordered by ascending delay after bootstrap', () async {
@@ -431,30 +309,6 @@ void main() {
       controller.nodes.map((n) => n.rawLink).toList(),
       ['vless://fast@x:443#F', 'vless://slow@x:443#S'],
     );
-  });
-
-  test('the cache is pruned when a node disappears from the current set', () async {
-    var body = 'vless://a@x:443#A\nvless://b@x:443#B';
-    final client = MockClient((_) async => http.Response(body, 200));
-    final gateway = FakeV2rayGateway(
-      delayScript: {'vless://a@x:443#A': 11, 'vless://b@x:443#B': 22},
-    );
-    final controller = _buildController(httpClient: client, gateway: gateway);
-    await controller.bootstrap();
-    await controller.retestAll();
-
-    expect(
-      (await StorageService().loadNodeDelays()).keys,
-      containsAll(['vless://a@x:443#A', 'vless://b@x:443#B']),
-    );
-
-    // 订阅改为只返回 a；再刷新 + 重测，缓存应被裁剪掉 b。
-    body = 'vless://a@x:443#A';
-    await controller.refreshSubscriptions();
-
-    final cached = await StorageService().loadNodeDelays();
-    expect(cached.containsKey('vless://a@x:443#A'), isTrue);
-    expect(cached.containsKey('vless://b@x:443#B'), isFalse);
   });
 
   test('connectToNode connects the selected node and persists it on success', () async {
